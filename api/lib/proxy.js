@@ -1,8 +1,3 @@
-/**
- * Shared proxy logic for Kimchi API.
- * Handles request forwarding, retry logic, and streaming.
- */
-
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 524]);
 const DEFAULT_MAX_RETRIES = 10;
 const BASE_DELAY_MS = 1000;
@@ -10,17 +5,11 @@ const MAX_DELAY_MS = 60000;
 const BACKOFF_FACTOR = 2;
 const FETCH_TIMEOUT_MS = 20000;
 
-/**
- * Compute retry delay with exponential backoff and full jitter.
- */
 function computeDelay(attempt, random = Math.random) {
   const planned = Math.min(BASE_DELAY_MS * Math.pow(BACKOFF_FACTOR, attempt - 1), MAX_DELAY_MS);
   return Math.max(planned * random(), 100);
 }
 
-/**
- * Parse Retry-After header.
- */
 function parseRetryAfterMs(response) {
   const header = response.headers.get("retry-after");
   if (!header) return null;
@@ -31,13 +20,20 @@ function parseRetryAfterMs(response) {
   return null;
 }
 
-/**
- * Proxy a request to Kimchi API with retry logic.
- */
+function isCreditExhausted(response, body) {
+  if (response.status !== 402 && response.status !== 429) return false;
+  try {
+    const text = typeof body === "string" ? body : "";
+    return text.includes("exhausted") || text.includes("credit");
+  } catch {
+    return false;
+  }
+}
+
 async function proxyToKimchi(options) {
   const {
     upstreamUrl,
-    apiKey,
+    getNextKey,
     requestHeaders = {},
     requestBody,
     method = "POST",
@@ -48,20 +44,31 @@ async function proxyToKimchi(options) {
 
   const maxRetries = retry.maxRetries ?? DEFAULT_MAX_RETRIES;
   const lastError = [];
+  let currentKey = null;
+  let currentIndex = 0;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const keyInfo = getNextKey();
+    currentKey = keyInfo.key;
+    currentIndex = keyInfo.index;
+
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    const finalSignal = signal ? AbortSignal.any([ctrl.signal, signal]) : ctrl.signal;
+    const finalSignal = signal
+      ? typeof AbortSignal.any === "function"
+        ? AbortSignal.any([ctrl.signal, signal])
+        : ctrl.signal
+      : ctrl.signal;
 
     try {
       const response = await fetch(upstreamUrl, {
         method,
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${currentKey}`,
           "User-Agent": "kimchi-proxy/1.0.0",
           ...requestHeaders,
+          "X-Proxy-Key-Index": String(currentIndex),
         },
         body: requestBody ? JSON.stringify(requestBody) : undefined,
         signal: finalSignal,
@@ -70,10 +77,18 @@ async function proxyToKimchi(options) {
       clearTimeout(timer);
 
       if (!RETRYABLE_STATUSES.has(response.status)) {
-        return { response, keyIndex: 0, attempts: attempt };
+        return { response, keyIndex: currentIndex, attempts: attempt };
       }
 
-      await response.body?.cancel().catch(() => {});
+      const responseText = await response.text().catch(() => "");
+
+      if (isCreditExhausted(response, responseText)) {
+        lastError.push(new Error(`HTTP ${response.status}: credits exhausted (key ${currentIndex})`));
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          continue;
+        }
+      }
 
       lastError.push(new Error(`HTTP ${response.status}`));
 
@@ -99,9 +114,6 @@ async function proxyToKimchi(options) {
   throw new Error("Proxy retry loop exhausted");
 }
 
-/**
- * Stream upstream response to client.
- */
 async function streamResponse(clientRes, upstreamRes) {
   const reader = upstreamRes.body?.getReader();
   if (!reader) {
@@ -121,7 +133,6 @@ async function streamResponse(clientRes, upstreamRes) {
 
   clientRes.status(upstreamRes.status);
 
-  // For Vercel serverless, we need to write chunks directly
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
