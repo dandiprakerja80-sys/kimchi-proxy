@@ -5,6 +5,17 @@ const MAX_DELAY_MS = 5000;
 const BACKOFF_FACTOR = 1.5;
 const FETCH_TIMEOUT_MS = 10000;
 
+const KIMCHI_CLI_HEADERS = {
+  "User-Agent": "kimchi/0.1.34",
+  "Accept": "application/json",
+  "X-Stainless-Lang": "js",
+  "X-Stainless-Package-Version": "5.20.0",
+  "X-Stainless-OS": "linux",
+  "X-Stainless-Arch": "x64",
+  "X-Stainless-Runtime": "node",
+  "X-Stainless-Runtime-Version": "v22.0.0",
+};
+
 function computeDelay(attempt, random = Math.random) {
   const planned = Math.min(BASE_DELAY_MS * Math.pow(BACKOFF_FACTOR, attempt - 1), MAX_DELAY_MS);
   return Math.max(planned * random(), 50);
@@ -74,7 +85,7 @@ async function proxyToKimchi(options) {
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${currentKey}`,
-          "User-Agent": "kimchi-proxy/1.0.0",
+          ...KIMCHI_CLI_HEADERS,
           ...requestHeaders,
           "X-Proxy-Key-Index": String(currentIndex),
         },
