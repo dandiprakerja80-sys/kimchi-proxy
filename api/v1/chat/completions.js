@@ -1,5 +1,5 @@
 const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
-const { proxyToKimchi, writeResponse } = require("../../lib/proxy.js");
+const { proxyToKimchi, proxyToKimchiStreaming, writeResponse, streamResponse } = require("../../lib/proxy.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 
@@ -52,26 +52,46 @@ module.exports = async function handler(req, res) {
     }
 
     startTime = Date.now();
+    const isStreaming = body.stream === true;
 
-    const result = await proxyToKimchi({
-      upstreamUrl: KIMCHI_UPSTREAM,
-      getNextKey,
-      requestBody: body,
-      requestHeaders: {
-        "X-Request-Start": String(Date.now()),
-      },
-      maxRetries: Math.min(keys.length, 55),
-      signal: AbortSignal.timeout(55000),
-    });
+    if (isStreaming) {
+      const result = await proxyToKimchiStreaming({
+        upstreamUrl: KIMCHI_UPSTREAM,
+        getNextKey,
+        requestBody: body,
+        requestHeaders: {
+          "X-Request-Start": String(Date.now()),
+        },
+        signal: AbortSignal.timeout(55000),
+      });
 
-    const elapsed = Date.now() - startTime;
+      const elapsed = Date.now() - startTime;
+      res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
+      res.setHeader("X-Proxy-Key-Total", String(keys.length));
+      res.setHeader("X-Proxy-Attempts", String(result.attempts));
+      res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
 
-    res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
-    res.setHeader("X-Proxy-Key-Total", String(keys.length));
-    res.setHeader("X-Proxy-Attempts", String(result.attempts));
-    res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
+      streamResponse(res, result);
+    } else {
+      const result = await proxyToKimchi({
+        upstreamUrl: KIMCHI_UPSTREAM,
+        getNextKey,
+        requestBody: body,
+        requestHeaders: {
+          "X-Request-Start": String(Date.now()),
+        },
+        maxRetries: Math.min(keys.length, 55),
+        signal: AbortSignal.timeout(55000),
+      });
 
-    await writeResponse(res, result);
+      const elapsed = Date.now() - startTime;
+      res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
+      res.setHeader("X-Proxy-Key-Total", String(keys.length));
+      res.setHeader("X-Proxy-Attempts", String(result.attempts));
+      res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
+
+      writeResponse(res, result);
+    }
   } catch (error) {
     console.error("[completions proxy] error:", error);
     const elapsed = startTime ? Date.now() - startTime : 0;

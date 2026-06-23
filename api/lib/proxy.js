@@ -102,6 +102,59 @@ function requestUpstream(options) {
   });
 }
 
+function requestUpstreamStreaming(options) {
+  return new Promise((resolve, reject) => {
+    const { url, method, headers, body, timeoutMs, signal } = options;
+    const parsed = new URL(url);
+    const lib = parsed.protocol === "https:" ? https : http;
+
+    const reqHeaders = { ...headers, "Content-Length": Buffer.byteLength(body || "") };
+
+    const req = lib.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method,
+        headers: reqHeaders,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          stream: res,
+        });
+      },
+    );
+
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Request timeout"));
+    });
+
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy();
+        reject(new Error("Request aborted"));
+        return;
+      }
+      signal.addEventListener(
+        "abort",
+        () => {
+          req.destroy();
+          reject(new Error("Request aborted"));
+        },
+        { once: true },
+      );
+    }
+
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 async function proxyToKimchi(options) {
   const {
     upstreamUrl,
@@ -183,6 +236,56 @@ async function proxyToKimchi(options) {
   throw new Error("Proxy retry loop exhausted");
 }
 
+async function proxyToKimchiStreaming(options) {
+  const {
+    upstreamUrl,
+    getNextKey,
+    requestHeaders = {},
+    requestBody,
+    method = "POST",
+    timeoutMs = FETCH_TIMEOUT_MS,
+    signal,
+  } = options;
+
+  let lastError = [];
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const keyInfo = getNextKey();
+
+    try {
+      const result = await requestUpstreamStreaming({
+        url: upstreamUrl,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${keyInfo.key}`,
+          ...KIMCHI_CLI_HEADERS,
+          ...requestHeaders,
+          "X-Proxy-Key-Index": String(keyInfo.index),
+        },
+        body: requestBody ? JSON.stringify(requestBody) : undefined,
+        timeoutMs: timeoutMs * 3,
+        signal,
+      });
+
+      return {
+        status: result.status,
+        headers: result.headers,
+        stream: result.stream,
+        keyIndex: keyInfo.index,
+        attempts: attempt,
+      };
+    } catch (error) {
+      lastError.push(error instanceof Error ? error : new Error(String(error)));
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+  }
+
+  throw new Error(`Streaming proxy failed: ${lastError.map((e) => e.message).join("; ")}`);
+}
+
 function writeResponse(clientRes, result) {
   const skipHeaders = new Set(["transfer-encoding", "connection", "content-length"]);
   for (const [key, value] of Object.entries(result.headers)) {
@@ -197,4 +300,20 @@ function writeResponse(clientRes, result) {
   clientRes.end(body);
 }
 
-module.exports = { proxyToKimchi, writeResponse };
+function streamResponse(clientRes, result) {
+  const skipHeaders = new Set(["transfer-encoding", "connection", "content-length"]);
+  for (const [key, value] of Object.entries(result.headers)) {
+    if (!skipHeaders.has(key.toLowerCase())) {
+      clientRes.setHeader(key, String(value));
+    }
+  }
+
+  clientRes.setHeader("Content-Type", "text/event-stream");
+  clientRes.setHeader("Cache-Control", "no-cache");
+  clientRes.setHeader("Connection", "keep-alive");
+  clientRes.status(result.status);
+
+  result.stream.pipe(clientRes);
+}
+
+module.exports = { proxyToKimchi, proxyToKimchiStreaming, writeResponse, streamResponse };
