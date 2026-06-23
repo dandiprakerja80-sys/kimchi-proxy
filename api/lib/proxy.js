@@ -1,13 +1,13 @@
 const RETRYABLE_STATUSES = new Set([402, 429, 500, 502, 503, 504, 524]);
-const DEFAULT_MAX_RETRIES = 5;
-const BASE_DELAY_MS = 500;
+const DEFAULT_MAX_RETRIES = 55;
+const BASE_DELAY_MS = 200;
 const MAX_DELAY_MS = 5000;
-const BACKOFF_FACTOR = 2;
-const FETCH_TIMEOUT_MS = 15000;
+const BACKOFF_FACTOR = 1.5;
+const FETCH_TIMEOUT_MS = 10000;
 
 function computeDelay(attempt, random = Math.random) {
   const planned = Math.min(BASE_DELAY_MS * Math.pow(BACKOFF_FACTOR, attempt - 1), MAX_DELAY_MS);
-  return Math.max(planned * random(), 100);
+  return Math.max(planned * random(), 50);
 }
 
 function parseRetryAfterMs(response) {
@@ -37,28 +37,36 @@ async function proxyToKimchi(options) {
     requestHeaders = {},
     requestBody,
     method = "POST",
+    maxRetries: maxRetriesParam,
     retry = {},
     timeoutMs = FETCH_TIMEOUT_MS,
     signal,
   } = options;
 
-  const maxRetries = retry.maxRetries ?? DEFAULT_MAX_RETRIES;
+  const maxRetries = maxRetriesParam ?? retry.maxRetries ?? DEFAULT_MAX_RETRIES;
   const lastError = [];
   let currentKey = null;
   let currentIndex = 0;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) {
+      throw new Error(`Proxy aborted after ${attempt - 1} attempts`);
+    }
+
     const keyInfo = getNextKey();
     currentKey = keyInfo.key;
     currentIndex = keyInfo.index;
 
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    const finalSignal = signal
-      ? typeof AbortSignal.any === "function"
-        ? AbortSignal.any([ctrl.signal, signal])
-        : ctrl.signal
-      : ctrl.signal;
+    let finalSignal = ctrl.signal;
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(timer);
+        throw new Error(`Proxy aborted after ${attempt - 1} attempts`);
+      }
+      signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+    }
 
     try {
       const response = await fetch(upstreamUrl, {
@@ -84,26 +92,24 @@ async function proxyToKimchi(options) {
 
       if (isCreditExhausted(response, responseText)) {
         lastError.push(new Error(`HTTP ${response.status}: credits exhausted (key ${currentIndex})`));
-        if (attempt < maxRetries) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          continue;
-        }
+        continue;
       }
 
-      lastError.push(new Error(`HTTP ${response.status}`));
+      lastError.push(new Error(`HTTP ${response.status} (key ${currentIndex})`));
 
-      const retryAfterMs = parseRetryAfterMs(response);
-      const delay = retryAfterMs !== null ? Math.max(computeDelay(attempt), retryAfterMs) : computeDelay(attempt);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      if (response.status === 429) {
+        const retryAfterMs = parseRetryAfterMs(response);
+        const delay = retryAfterMs !== null ? Math.max(computeDelay(attempt), retryAfterMs) : computeDelay(attempt);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
     } catch (error) {
       clearTimeout(timer);
-      if (signal?.aborted) throw error;
 
       lastError.push(error instanceof Error ? error : new Error(String(error)));
 
       if (attempt === maxRetries) {
         throw new Error(
-          `Proxy failed after ${maxRetries} attempts: ${lastError.map((e) => e.message).join("; ")}`,
+          `Proxy failed after ${maxRetries} attempts: ${lastError.slice(-3).map((e) => e.message).join("; ")}`,
         );
       }
 

@@ -4,6 +4,8 @@ const { proxyToKimchi, streamResponse } = require("../../lib/proxy.js");
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 
 module.exports = async function handler(req, res) {
+  const keysRaw = process.env.KIMCHI_API_KEYS;
+  const keys = parseKeys(keysRaw);
   let startTime = 0;
   let lastKeyIndex = 0;
 
@@ -11,9 +13,6 @@ module.exports = async function handler(req, res) {
     if (req.method !== "POST") {
       return res.status(405).json({ error: "Method not allowed" });
     }
-
-    const keysRaw = process.env.KIMCHI_API_KEYS;
-    const keys = parseKeys(keysRaw);
 
     if (keys.length === 0) {
       return res.status(500).json({ error: "No API keys configured. Set KIMCHI_API_KEYS env var." });
@@ -35,10 +34,10 @@ module.exports = async function handler(req, res) {
     let rotateIndex = keySelection.index;
 
     const getNextKey = () => {
-      let attempts = 0;
-      while (isKeyThrottled(keys[rotateIndex]) && attempts < keys.length) {
+      let skipAttempts = 0;
+      while (isKeyThrottled(keys[rotateIndex]) && skipAttempts < keys.length) {
         rotateIndex = (rotateIndex + 1) % keys.length;
-        attempts++;
+        skipAttempts++;
       }
       const key = keys[rotateIndex];
       const idx = rotateIndex;
@@ -61,7 +60,8 @@ module.exports = async function handler(req, res) {
       requestHeaders: {
         "X-Request-Start": String(Date.now()),
       },
-      signal: AbortSignal.timeout(50000),
+      maxRetries: Math.min(keys.length, 55),
+      signal: AbortSignal.timeout(55000),
     });
 
     const elapsed = Date.now() - startTime;
@@ -81,7 +81,7 @@ module.exports = async function handler(req, res) {
       ok: false,
       error: "Failed to reach Kimchi API",
       keyIndex: lastKeyIndex,
-      keyTotal: keys?.length || 0,
+      keyTotal: keys.length,
       attempts: 0,
       elapsedMs: elapsed,
       details: err.message,
