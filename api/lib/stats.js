@@ -118,6 +118,9 @@ function getStats() {
     keyErrors[key] = val;
   });
 
+  const keysRaw = process.env.KIMCHI_API_KEYS || "";
+  const totalKeys = keysRaw ? keysRaw.split(/[,\s]+/).filter(Boolean).length : 0;
+
   return {
     totalRequests: stats.totalRequests,
     totalInputTokens: stats.totalInputTokens,
@@ -125,8 +128,8 @@ function getStats() {
     totalErrors: stats.totalErrors,
     estimatedCost: cost,
     keys: {
-      total: stats.keys.total,
-      active: stats.keys.total - stats.keys.exhausted.size,
+      total: totalKeys,
+      active: totalKeys - stats.keys.exhausted.size,
       exhausted: stats.keys.exhausted.size,
       throttled: stats.keys.throttled.size,
       errors: keyErrors,
