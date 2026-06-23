@@ -31,11 +31,10 @@ function parseRetryAfterMs(response) {
   return null;
 }
 
-function isCreditExhausted(response, body) {
-  if (response.status !== 402 && response.status !== 429) return false;
+function isCreditExhausted(status, body) {
+  if (status !== 402 && status !== 429) return false;
   try {
-    const text = typeof body === "string" ? body : "";
-    return text.includes("exhausted") || text.includes("credit") || text.includes("quota");
+    return body.includes("exhausted") || body.includes("credit") || body.includes("quota");
   } catch {
     return false;
   }
@@ -95,13 +94,23 @@ async function proxyToKimchi(options) {
 
       clearTimeout(timer);
 
+      const responseText = await response.text().catch(() => "");
+      const responseHeaders = {};
+      response.headers.forEach((value, key) => {
+        responseHeaders[key] = value;
+      });
+
       if (!RETRYABLE_STATUSES.has(response.status)) {
-        return { response, keyIndex: currentIndex, attempts: attempt };
+        return {
+          status: response.status,
+          headers: responseHeaders,
+          body: responseText,
+          keyIndex: currentIndex,
+          attempts: attempt,
+        };
       }
 
-      const responseText = await response.text().catch(() => "");
-
-      if (isCreditExhausted(response, responseText)) {
+      if (isCreditExhausted(response.status, responseText)) {
         lastError.push(new Error(`HTTP ${response.status}: credits exhausted (key ${currentIndex})`));
         continue;
       }
@@ -131,38 +140,16 @@ async function proxyToKimchi(options) {
   throw new Error("Proxy retry loop exhausted");
 }
 
-async function streamResponse(clientRes, upstreamRes) {
-  const contentType = upstreamRes.headers.get("content-type") || "";
-
-  for (const [key, value] of upstreamRes.headers.entries()) {
-    if (!["transfer-encoding", "connection", "content-length"].includes(key.toLowerCase())) {
+function writeResponse(clientRes, result) {
+  const skipHeaders = new Set(["transfer-encoding", "connection", "content-length"]);
+  for (const [key, value] of Object.entries(result.headers)) {
+    if (!skipHeaders.has(key.toLowerCase())) {
       clientRes.setHeader(key, value);
     }
   }
 
-  clientRes.status(upstreamRes.status);
-
-  if (contentType.includes("text/event-stream")) {
-    clientRes.setHeader("Content-Type", "text/event-stream");
-    clientRes.setHeader("Cache-Control", "no-cache");
-    clientRes.setHeader("Connection", "keep-alive");
-
-    const reader = upstreamRes.body?.getReader();
-    if (!reader) {
-      clientRes.end();
-      return;
-    }
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      clientRes.write(value);
-    }
-    clientRes.end();
-  } else {
-    const body = await upstreamRes.text();
-    clientRes.end(body);
-  }
+  clientRes.status(result.status);
+  clientRes.end(result.body);
 }
 
-module.exports = { proxyToKimchi, streamResponse };
+module.exports = { proxyToKimchi, writeResponse };

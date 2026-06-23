@@ -1,5 +1,5 @@
 const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
-const { proxyToKimchi, streamResponse } = require("../../lib/proxy.js");
+const { proxyToKimchi, writeResponse } = require("../../lib/proxy.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 
@@ -71,7 +71,7 @@ module.exports = async function handler(req, res) {
     res.setHeader("X-Proxy-Attempts", String(result.attempts));
     res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
 
-    await streamResponse(res, result.response);
+    await writeResponse(res, result);
   } catch (error) {
     console.error("[completions proxy] error:", error);
     const elapsed = startTime ? Date.now() - startTime : 0;
