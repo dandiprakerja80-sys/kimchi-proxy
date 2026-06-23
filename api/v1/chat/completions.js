@@ -1,5 +1,6 @@
 const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
 const { proxyToKimchi, proxyToKimchiStreaming, writeResponse, streamResponse } = require("../../lib/proxy.js");
+const { logRequest } = require("../../lib/stats.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 
@@ -8,6 +9,7 @@ module.exports = async function handler(req, res) {
   const keys = parseKeys(keysRaw);
   let startTime = 0;
   let lastKeyIndex = 0;
+  let model = "unknown";
 
   try {
     if (req.method !== "POST") {
@@ -51,6 +53,7 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: "Invalid request body" });
     }
 
+    model = body.model || "unknown";
     startTime = Date.now();
     const isStreaming = body.stream === true;
 
@@ -71,6 +74,16 @@ module.exports = async function handler(req, res) {
       res.setHeader("X-Proxy-Attempts", String(result.attempts));
       res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
 
+      logRequest({
+        model,
+        status: result.status,
+        elapsed,
+        keyIndex: lastKeyIndex,
+        inputTokens: body.messages ? body.messages.reduce((s, m) => s + (m.content || "").length / 4, 0) : 0,
+        outputTokens: 0,
+        method: "POST",
+      });
+
       streamResponse(res, result);
     } else {
       const result = await proxyToKimchi({
@@ -90,12 +103,42 @@ module.exports = async function handler(req, res) {
       res.setHeader("X-Proxy-Attempts", String(result.attempts));
       res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
 
+      let inputTokens = 0;
+      let outputTokens = 0;
+      try {
+        const parsed = JSON.parse(result.body);
+        if (parsed.usage) {
+          inputTokens = parsed.usage.prompt_tokens || 0;
+          outputTokens = parsed.usage.completion_tokens || 0;
+        }
+      } catch {}
+
+      logRequest({
+        model,
+        status: result.status,
+        elapsed,
+        keyIndex: lastKeyIndex,
+        inputTokens,
+        outputTokens,
+        method: "POST",
+      });
+
       writeResponse(res, result);
     }
   } catch (error) {
     console.error("[completions proxy] error:", error);
     const elapsed = startTime ? Date.now() - startTime : 0;
     const err = error instanceof Error ? error : new Error(String(error));
+
+    logRequest({
+      model,
+      status: 502,
+      elapsed,
+      keyIndex: lastKeyIndex,
+      inputTokens: 0,
+      outputTokens: 0,
+      method: "POST",
+    });
 
     return res.status(502).json({
       ok: false,

@@ -3,6 +3,14 @@
     {
       "source": "/v1/:path*",
       "destination": "/api/v1/:path*"
+    },
+    {
+      "source": "/dashboard",
+      "destination": "/api/dashboard"
+    },
+    {
+      "source": "/",
+      "destination": "/api/dashboard"
     }
   ]
 }
