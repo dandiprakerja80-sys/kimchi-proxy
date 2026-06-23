@@ -160,8 +160,8 @@ async function streamResponse(clientRes, upstreamRes) {
     }
     clientRes.end();
   } else {
-    const body = await upstreamRes.arrayBuffer();
-    clientRes.end(Buffer.from(body));
+    const body = await upstreamRes.text();
+    clientRes.end(body);
   }
 }
 
