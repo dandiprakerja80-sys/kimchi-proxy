@@ -1,9 +1,9 @@
 const RETRYABLE_STATUSES = new Set([402, 429, 500, 502, 503, 504, 524]);
-const DEFAULT_MAX_RETRIES = 10;
-const BASE_DELAY_MS = 1000;
-const MAX_DELAY_MS = 60000;
+const DEFAULT_MAX_RETRIES = 5;
+const BASE_DELAY_MS = 500;
+const MAX_DELAY_MS = 5000;
 const BACKOFF_FACTOR = 2;
-const FETCH_TIMEOUT_MS = 20000;
+const FETCH_TIMEOUT_MS = 15000;
 
 function computeDelay(attempt, random = Math.random) {
   const planned = Math.min(BASE_DELAY_MS * Math.pow(BACKOFF_FACTOR, attempt - 1), MAX_DELAY_MS);

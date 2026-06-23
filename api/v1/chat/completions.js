@@ -61,6 +61,7 @@ module.exports = async function handler(req, res) {
       requestHeaders: {
         "X-Request-Start": String(Date.now()),
       },
+      signal: AbortSignal.timeout(50000),
     });
 
     const elapsed = Date.now() - startTime;
