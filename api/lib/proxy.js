@@ -1,9 +1,13 @@
+const https = require("https");
+const http = require("http");
+const { URL } = require("url");
+
 const RETRYABLE_STATUSES = new Set([402, 429, 500, 502, 503, 504, 524]);
 const DEFAULT_MAX_RETRIES = 55;
 const BASE_DELAY_MS = 200;
 const MAX_DELAY_MS = 5000;
 const BACKOFF_FACTOR = 1.5;
-const FETCH_TIMEOUT_MS = 10000;
+const FETCH_TIMEOUT_MS = 15000;
 
 const KIMCHI_CLI_HEADERS = {
   "User-Agent": "kimchi/0.1.34",
@@ -21,8 +25,8 @@ function computeDelay(attempt, random = Math.random) {
   return Math.max(planned * random(), 50);
 }
 
-function parseRetryAfterMs(response) {
-  const header = response.headers.get("retry-after");
+function parseRetryAfterMs(headers) {
+  const header = headers["retry-after"];
   if (!header) return null;
   const seconds = Number(header);
   if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
@@ -38,6 +42,64 @@ function isCreditExhausted(status, body) {
   } catch {
     return false;
   }
+}
+
+function requestUpstream(options) {
+  return new Promise((resolve, reject) => {
+    const { url, method, headers, body, timeoutMs, signal } = options;
+    const parsed = new URL(url);
+    const lib = parsed.protocol === "https:" ? https : http;
+
+    const reqHeaders = { ...headers, "Content-Length": Buffer.byteLength(body || "") };
+
+    const req = lib.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === "https:" ? 443 : 80),
+        path: parsed.pathname + parsed.search,
+        method,
+        headers: reqHeaders,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString("utf-8"),
+          });
+        });
+        res.on("error", reject);
+      },
+    );
+
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Request timeout"));
+    });
+
+    if (signal) {
+      if (signal.aborted) {
+        req.destroy();
+        reject(new Error("Request aborted"));
+        return;
+      }
+      signal.addEventListener(
+        "abort",
+        () => {
+          req.destroy();
+          reject(new Error("Request aborted"));
+        },
+        { once: true },
+      );
+    }
+
+    if (body) req.write(body);
+    req.end();
+  });
 }
 
 async function proxyToKimchi(options) {
@@ -67,19 +129,9 @@ async function proxyToKimchi(options) {
     currentKey = keyInfo.key;
     currentIndex = keyInfo.index;
 
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    let finalSignal = ctrl.signal;
-    if (signal) {
-      if (signal.aborted) {
-        clearTimeout(timer);
-        throw new Error(`Proxy aborted after ${attempt - 1} attempts`);
-      }
-      signal.addEventListener("abort", () => ctrl.abort(), { once: true });
-    }
-
     try {
-      const response = await fetch(upstreamUrl, {
+      const result = await requestUpstream({
+        url: upstreamUrl,
         method,
         headers: {
           "Content-Type": "application/json",
@@ -89,42 +141,33 @@ async function proxyToKimchi(options) {
           "X-Proxy-Key-Index": String(currentIndex),
         },
         body: requestBody ? JSON.stringify(requestBody) : undefined,
-        signal: finalSignal,
+        timeoutMs,
+        signal,
       });
 
-      clearTimeout(timer);
-
-      const responseText = await response.text().catch(() => "");
-      const responseHeaders = {};
-      response.headers.forEach((value, key) => {
-        responseHeaders[key] = value;
-      });
-
-      if (!RETRYABLE_STATUSES.has(response.status)) {
+      if (!RETRYABLE_STATUSES.has(result.status)) {
         return {
-          status: response.status,
-          headers: responseHeaders,
-          body: responseText,
+          status: result.status,
+          headers: result.headers,
+          body: result.body,
           keyIndex: currentIndex,
           attempts: attempt,
         };
       }
 
-      if (isCreditExhausted(response.status, responseText)) {
-        lastError.push(new Error(`HTTP ${response.status}: credits exhausted (key ${currentIndex})`));
+      if (isCreditExhausted(result.status, result.body)) {
+        lastError.push(new Error(`HTTP ${result.status}: credits exhausted (key ${currentIndex})`));
         continue;
       }
 
-      lastError.push(new Error(`HTTP ${response.status} (key ${currentIndex})`));
+      lastError.push(new Error(`HTTP ${result.status} (key ${currentIndex})`));
 
-      if (response.status === 429) {
-        const retryAfterMs = parseRetryAfterMs(response);
+      if (result.status === 429) {
+        const retryAfterMs = parseRetryAfterMs(result.headers);
         const delay = retryAfterMs !== null ? Math.max(computeDelay(attempt), retryAfterMs) : computeDelay(attempt);
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     } catch (error) {
-      clearTimeout(timer);
-
       lastError.push(error instanceof Error ? error : new Error(String(error)));
 
       if (attempt === maxRetries) {
@@ -144,7 +187,7 @@ function writeResponse(clientRes, result) {
   const skipHeaders = new Set(["transfer-encoding", "connection", "content-length"]);
   for (const [key, value] of Object.entries(result.headers)) {
     if (!skipHeaders.has(key.toLowerCase())) {
-      clientRes.setHeader(key, value);
+      clientRes.setHeader(key, String(value));
     }
   }
 
