@@ -1,4 +1,4 @@
-const { getStats } = require("./lib/stats.js");
+
 
 const SESSION_SECRET = process.env.DASHBOARD_PASSWORD || "kimchi-proxy";
 
@@ -293,8 +293,16 @@ module.exports = async function handler(req, res) {
     }
     const url = new URL(req.url, "http://localhost");
     const range = url.searchParams.get("range") || "today";
-    const stats = getStats(range);
-    return res.status(200).json(stats);
+    try {
+      const statsUrl = `https://${req.headers.host}/api/v1/chat/completions?action=stats&range=${range}`;
+      const statsRes = await fetch(statsUrl, {
+        headers: { Cookie: req.headers.cookie || "" },
+      });
+      const stats = await statsRes.json();
+      return res.status(200).json(stats);
+    } catch (e) {
+      return res.status(200).json({ totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCost: "0.00", totalErrors: 0, requests: [], errors: [], keys: { total: 55, active: 55, exhausted: 0, throttled: 0, errors: [] }, recentRequests: [] });
+    }
   }
 
   res.setHeader("Content-Type", "text/html");

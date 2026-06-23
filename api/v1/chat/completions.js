@@ -1,10 +1,17 @@
 const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
 const { proxyToKimchi, proxyToKimchiStreaming, writeResponse, streamResponse } = require("../../lib/proxy.js");
-const { logRequest } = require("../../lib/stats.js");
+const { logRequest, getStats } = require("../../lib/stats.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 
 module.exports = async function handler(req, res) {
+  if (req.method === "GET" && req.url && req.url.includes("action=stats")) {
+    const url = new URL(req.url, "http://localhost");
+    const range = url.searchParams.get("range") || "today";
+    const stats = getStats(range);
+    return res.status(200).json(stats);
+  }
+
   const keysRaw = process.env.KIMCHI_API_KEYS;
   const keys = parseKeys(keysRaw);
   let startTime = 0;
@@ -62,9 +69,7 @@ module.exports = async function handler(req, res) {
         upstreamUrl: KIMCHI_UPSTREAM,
         getNextKey,
         requestBody: body,
-        requestHeaders: {
-          "X-Request-Start": String(Date.now()),
-        },
+        requestHeaders: { "X-Request-Start": String(Date.now()) },
         signal: AbortSignal.timeout(55000),
       });
 
@@ -90,9 +95,7 @@ module.exports = async function handler(req, res) {
         upstreamUrl: KIMCHI_UPSTREAM,
         getNextKey,
         requestBody: body,
-        requestHeaders: {
-          "X-Request-Start": String(Date.now()),
-        },
+        requestHeaders: { "X-Request-Start": String(Date.now()) },
         maxRetries: Math.min(keys.length, 55),
         signal: AbortSignal.timeout(55000),
       });
