@@ -257,12 +257,11 @@ setInterval(load,5000);
 </html>`;
 
 module.exports = async function handler(req, res) {
-  if (req.method === "GET" && req.url === "/dashboard" && !checkAuth(req)) {
-    res.setHeader("Content-Type", "text/html");
-    return res.status(200).end(LOGIN_HTML);
-  }
-
-  if (req.method === "GET" && req.url === "/dashboard") {
+  if (req.method === "GET" && (req.url === "/dashboard" || req.url === "/api/dashboard" || req.url === "/api/dashboard?") && !req.url.includes("action=")) {
+    if (!checkAuth(req)) {
+      res.setHeader("Content-Type", "text/html");
+      return res.status(200).end(LOGIN_HTML);
+    }
     res.setHeader("Content-Type", "text/html");
     return res.status(200).end(DASHBOARD_HTML);
   }
