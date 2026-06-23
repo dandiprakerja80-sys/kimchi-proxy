@@ -70,7 +70,7 @@ async function proxyToKimchi(options) {
       clearTimeout(timer);
 
       if (!RETRYABLE_STATUSES.has(response.status)) {
-        return { response, keyIndex: 0, attempts };
+        return { response, keyIndex: 0, attempts: attempt };
       }
 
       await response.body?.cancel().catch(() => {});
