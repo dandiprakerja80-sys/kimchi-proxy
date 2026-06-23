@@ -1,4 +1,4 @@
-const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 524]);
+const RETRYABLE_STATUSES = new Set([402, 429, 500, 502, 503, 504, 524]);
 const DEFAULT_MAX_RETRIES = 10;
 const BASE_DELAY_MS = 1000;
 const MAX_DELAY_MS = 60000;
@@ -24,7 +24,7 @@ function isCreditExhausted(response, body) {
   if (response.status !== 402 && response.status !== 429) return false;
   try {
     const text = typeof body === "string" ? body : "";
-    return text.includes("exhausted") || text.includes("credit");
+    return text.includes("exhausted") || text.includes("credit") || text.includes("quota");
   } catch {
     return false;
   }
@@ -85,7 +85,7 @@ async function proxyToKimchi(options) {
       if (isCreditExhausted(response, responseText)) {
         lastError.push(new Error(`HTTP ${response.status}: credits exhausted (key ${currentIndex})`));
         if (attempt < maxRetries) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          await new Promise((resolve) => setTimeout(resolve, 50));
           continue;
         }
       }
