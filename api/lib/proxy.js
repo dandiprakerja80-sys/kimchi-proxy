@@ -148,8 +148,10 @@ function writeResponse(clientRes, result) {
     }
   }
 
+  const body = result.body || "";
+  clientRes.setHeader("Content-Length", Buffer.byteLength(body));
   clientRes.status(result.status);
-  clientRes.end(result.body);
+  clientRes.end(body);
 }
 
 module.exports = { proxyToKimchi, writeResponse };
