@@ -1,5 +1,5 @@
-const { parseKeys, selectKey, throttleKey } = require("../lib/key-rotation.js");
-const { proxyToKimchi, streamResponse } = require("../lib/proxy.js");
+const { parseKeys, selectKey, throttleKey } = require("../../lib/key-rotation.js");
+const { proxyToKimchi, streamResponse } = require("../../lib/proxy.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 

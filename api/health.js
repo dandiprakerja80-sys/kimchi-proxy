@@ -1,4 +1,4 @@
-const { parseKeys, selectKey, throttleKey, getKeyStatus } = require("../lib/key-rotation.js");
+const { parseKeys, selectKey, throttleKey, getKeyStatus } = require("./lib/key-rotation.js");
 
 module.exports = async function handler(req, res) {
   try {
