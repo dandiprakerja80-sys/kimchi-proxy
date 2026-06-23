@@ -90,9 +90,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .topbar h1{font-size:18px;font-weight:700;display:flex;align-items:center;gap:10px}
   .topbar .dot{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-  .topbar a{color:#6b6b80;text-decoration:none;font-size:13px;transition:color .2s}
-  .topbar a:hover{color:#ff6b35}
+  .topbar-right{display:flex;align-items:center;gap:20px}
+  .topbar-date{color:#9090a8;font-size:13px;font-weight:500;text-align:right;line-height:1.4}
+  .topbar-date .day{color:#f0f0f5;font-weight:700;font-size:14px}
+  .topbar a.signout{color:#6b6b80;text-decoration:none;font-size:13px;transition:color .2s}
+  .topbar a.signout:hover{color:#ff6b35}
   .container{max-width:1200px;margin:0 auto;padding:32px}
+  .range-tabs{display:flex;gap:8px;margin-bottom:24px}
+  .range-tab{padding:8px 20px;border-radius:8px;border:1px solid #1e1e2e;background:#111118;color:#6b6b80;font-size:13px;font-weight:600;cursor:pointer;transition:all .2s}
+  .range-tab:hover{border-color:#ff6b35;color:#f0f0f5}
+  .range-tab.active{background:linear-gradient(135deg,#ff6b35,#ff4500);border-color:transparent;color:#fff}
   .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;margin-bottom:32px}
   .stat{background:#111118;border:1px solid #1e1e2e;border-radius:14px;padding:24px}
   .stat .label{color:#6b6b80;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px}
@@ -138,9 +145,18 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <body>
 <div class="topbar">
   <h1><span class="dot"></span> Kimchi Proxy</h1>
-  <a href="/api/dashboard?action=logout">Sign Out</a>
+  <div class="topbar-right">
+    <div class="topbar-date" id="clock"></div>
+    <a class="signout" href="/api/dashboard?action=logout">Sign Out</a>
+  </div>
 </div>
 <div class="container">
+  <div class="range-tabs" id="range-tabs">
+    <div class="range-tab active" data-range="today">Today</div>
+    <div class="range-tab" data-range="week">This Week</div>
+    <div class="range-tab" data-range="month">This Month</div>
+    <div class="range-tab" data-range="all">All Time</div>
+  </div>
   <div class="stats">
     <div class="stat"><div class="label">Total Requests</div><div class="value" id="s-req">—</div></div>
     <div class="stat"><div class="label">Input Tokens</div><div class="value" id="s-in">—</div></div>
@@ -183,13 +199,35 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   </div>
 </div>
 <script>
+let currentRange='today';
 function fmt(n){if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toLocaleString()}
 function ago(ts){const s=Math.floor((Date.now()-ts)/1000);if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'}
 function time(ts){return new Date(ts).toLocaleTimeString()}
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
+function updateClock(){
+  const now=new Date();
+  const days=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+  const months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const day=days[now.getDay()];
+  const date=now.getDate();
+  const month=months[now.getMonth()];
+  const year=now.getFullYear();
+  const time=now.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
+  document.getElementById('clock').innerHTML='<div class="day">'+day+'</div><div>'+date+' '+month+' '+year+' · '+time+'</div>';
+}
+updateClock();
+setInterval(updateClock,1000);
+document.getElementById('range-tabs').addEventListener('click',e=>{
+  const tab=e.target.closest('.range-tab');
+  if(!tab)return;
+  document.querySelectorAll('.range-tab').forEach(t=>t.classList.remove('active'));
+  tab.classList.add('active');
+  currentRange=tab.dataset.range;
+  load();
+});
 async function load(){
   try{
-    const r=await fetch('/api/dashboard?action=stats');
+    const r=await fetch('/api/dashboard?action=stats&range='+currentRange);
     if(!r.ok){window.location.href='/dashboard';return}
     const d=await r.json();
     document.getElementById('s-req').textContent=fmt(d.totalRequests);
@@ -249,11 +287,13 @@ module.exports = async function handler(req, res) {
     return res.status(302).end();
   }
 
-  if (req.method === "GET" && req.url === "/api/dashboard?action=stats") {
+  if (req.url && req.url.startsWith("/api/dashboard?action=stats")) {
     if (!checkAuth(req)) {
       return res.status(401).json({ error: "Unauthorized" });
     }
-    const stats = getStats();
+    const url = new URL(req.url, "http://localhost");
+    const range = url.searchParams.get("range") || "today";
+    const stats = getStats(range);
     return res.status(200).json(stats);
   }
 

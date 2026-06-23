@@ -14,15 +14,11 @@ const stats = {
   },
 };
 
-const MAX_RECENT = 100;
-const MAX_ERRORS = 200;
-const MAX_LOGS = 300;
+const MAX_RECENT = 500;
+const MAX_ERRORS = 500;
+const MAX_LOGS = 500;
 const EST_COST_PER_1K_INPUT = 0.0006;
 const EST_COST_PER_1K_OUTPUT = 0.0024;
-
-function setKeyTotal(count) {
-  stats.keys.total = count;
-}
 
 function markKeyExhausted(index) {
   stats.keys.exhausted.add(index);
@@ -73,7 +69,7 @@ function logRequest(data) {
   }
 
   if (data.status >= 400 || data.error) {
-    const errEntry = {
+    stats.errors.unshift({
       id: stats.errors.length + 1,
       request_id: stats.totalRequests,
       model: data.model,
@@ -82,8 +78,7 @@ function logRequest(data) {
       error: data.error || `HTTP ${data.status}`,
       details: data.details || null,
       timestamp: Date.now(),
-    };
-    stats.errors.unshift(errEntry);
+    });
     if (stats.errors.length > MAX_ERRORS) {
       stats.errors = stats.errors.slice(0, MAX_ERRORS);
     }
@@ -99,19 +94,45 @@ function logRequest(data) {
 }
 
 function addLog(entry) {
-  stats.logs.unshift({
-    ...entry,
-    id: stats.logs.length + 1,
-  });
+  stats.logs.unshift({ ...entry, id: stats.logs.length + 1 });
   if (stats.logs.length > MAX_LOGS) {
     stats.logs = stats.logs.slice(0, MAX_LOGS);
   }
 }
 
-function getStats() {
-  const cost =
-    (stats.totalInputTokens / 1000) * EST_COST_PER_1K_INPUT +
-    (stats.totalOutputTokens / 1000) * EST_COST_PER_1K_OUTPUT;
+function filterByRange(arr, range) {
+  if (range === "all") return arr;
+  const now = Date.now();
+  let since = 0;
+  if (range === "today") {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    since = d.getTime();
+  } else if (range === "week") {
+    since = now - 7 * 24 * 60 * 60 * 1000;
+  } else if (range === "month") {
+    since = now - 30 * 24 * 60 * 60 * 1000;
+  }
+  return arr.filter((e) => e.timestamp >= since);
+}
+
+function getStats(range) {
+  const filtered = filterByRange(stats.recentRequests, range);
+  const filteredErrors = filterByRange(stats.errors, range);
+
+  let totalIn = 0;
+  let totalOut = 0;
+  let totalReqs = 0;
+  let totalErrs = 0;
+
+  for (const r of filtered) {
+    totalReqs++;
+    totalIn += r.inputTokens || 0;
+    totalOut += r.outputTokens || 0;
+    if (r.status >= 400) totalErrs++;
+  }
+
+  const cost = (totalIn / 1000) * EST_COST_PER_1K_INPUT + (totalOut / 1000) * EST_COST_PER_1K_OUTPUT;
 
   const keyErrors = {};
   stats.keys.errors.forEach((val, key) => {
@@ -122,10 +143,11 @@ function getStats() {
   const totalKeys = keysRaw ? keysRaw.split(/[,\s]+/).filter(Boolean).length : 0;
 
   return {
-    totalRequests: stats.totalRequests,
-    totalInputTokens: stats.totalInputTokens,
-    totalOutputTokens: stats.totalOutputTokens,
-    totalErrors: stats.totalErrors,
+    range,
+    totalRequests: totalReqs,
+    totalInputTokens: totalIn,
+    totalOutputTokens: totalOut,
+    totalErrors: totalErrs,
     estimatedCost: cost,
     keys: {
       total: totalKeys,
@@ -134,8 +156,8 @@ function getStats() {
       throttled: stats.keys.throttled.size,
       errors: keyErrors,
     },
-    recentRequests: stats.recentRequests,
-    errors: stats.errors.slice(0, 50),
+    recentRequests: filtered.slice(0, 100),
+    errors: filteredErrors.slice(0, 50),
     logs: stats.logs.slice(0, 150),
   };
 }
@@ -144,7 +166,6 @@ module.exports = {
   logRequest,
   addLog,
   getStats,
-  setKeyTotal,
   markKeyExhausted,
   markKeyThrottled,
   unmarkKeyThrottled,
