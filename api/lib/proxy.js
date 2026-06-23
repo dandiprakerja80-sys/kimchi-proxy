@@ -132,15 +132,7 @@ async function proxyToKimchi(options) {
 }
 
 async function streamResponse(clientRes, upstreamRes) {
-  const reader = upstreamRes.body?.getReader();
-  if (!reader) {
-    clientRes.status(upstreamRes.status).end();
-    return;
-  }
-
-  clientRes.setHeader("Content-Type", upstreamRes.headers.get("content-type") || "text/event-stream");
-  clientRes.setHeader("Cache-Control", "no-cache");
-  clientRes.setHeader("Connection", "keep-alive");
+  const contentType = upstreamRes.headers.get("content-type") || "";
 
   for (const [key, value] of upstreamRes.headers.entries()) {
     if (!["transfer-encoding", "connection", "content-length"].includes(key.toLowerCase())) {
@@ -150,12 +142,27 @@ async function streamResponse(clientRes, upstreamRes) {
 
   clientRes.status(upstreamRes.status);
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    clientRes.write(value);
+  if (contentType.includes("text/event-stream")) {
+    clientRes.setHeader("Content-Type", "text/event-stream");
+    clientRes.setHeader("Cache-Control", "no-cache");
+    clientRes.setHeader("Connection", "keep-alive");
+
+    const reader = upstreamRes.body?.getReader();
+    if (!reader) {
+      clientRes.end();
+      return;
+    }
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      clientRes.write(value);
+    }
+    clientRes.end();
+  } else {
+    const body = await upstreamRes.arrayBuffer();
+    clientRes.end(Buffer.from(body));
   }
-  clientRes.end();
 }
 
 module.exports = { proxyToKimchi, streamResponse };
