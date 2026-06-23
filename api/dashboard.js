@@ -99,6 +99,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .stat .value{font-size:28px;font-weight:700;color:#f0f0f5;letter-spacing:-.5px}
   .stat .sub{color:#6b6b80;font-size:12px;margin-top:4px}
   .stat.accent .value{color:#ff6b35}
+  .stat.danger .value{color:#ff4545}
+  .stat.warn .value{color:#eab308}
+  .stat.ok .value{color:#22c55e}
   .section{margin-bottom:32px}
   .section h2{font-size:16px;font-weight:600;margin-bottom:16px;display:flex;align-items:center;gap:8px}
   .section h2 .icon{font-size:18px}
@@ -109,6 +112,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600}
   .badge.ok{background:rgba(34,197,94,.15);color:#22c55e}
   .badge.err{background:rgba(255,69,69,.15);color:#ff4545}
+  .badge.warn{background:rgba(234,179,8,.15);color:#eab308}
   .console{background:#0c0c14;border:1px solid #1e1e2e;border-radius:14px;overflow:hidden}
   .console-header{padding:12px 20px;background:#13131c;border-bottom:1px solid #1e1e2e;display:flex;align-items:center;justify-content:space-between}
   .console-header span{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:1px;color:#6b6b80}
@@ -119,7 +123,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .log-level.info{color:#22c55e}
   .log-level.error{color:#ff4545}
   .log-msg{color:#a0a0b0}
-  @media(max-width:768px){.stats{grid-template-columns:repeat(2,1fr)}.container{padding:16px}}
+  .key-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px}
+  .key-card{background:#16161f;border:1px solid #1e1e2e;border-radius:12px;padding:20px;text-align:center}
+  .key-card .num{font-size:32px;font-weight:700;margin-bottom:4px}
+  .key-card .lbl{color:#6b6b80;font-size:11px;text-transform:uppercase;letter-spacing:1px}
+  .key-card.green .num{color:#22c55e}
+  .key-card.red .num{color:#ff4545}
+  .key-card.yellow .num{color:#eab308}
+  .key-card.blue .num{color:#60a5fa}
+  .err-table td.error-msg{max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:12px}
+  @media(max-width:768px){.stats,.key-grid{grid-template-columns:repeat(2,1fr)}.container{padding:16px}}
 </style>
 </head>
 <body>
@@ -128,19 +141,39 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <a href="/api/dashboard?action=logout">Sign Out</a>
 </div>
 <div class="container">
-  <div class="stats" id="stats">
+  <div class="stats">
     <div class="stat"><div class="label">Total Requests</div><div class="value" id="s-req">—</div></div>
     <div class="stat"><div class="label">Input Tokens</div><div class="value" id="s-in">—</div></div>
     <div class="stat"><div class="label">Output Tokens</div><div class="value" id="s-out">—</div></div>
     <div class="stat accent"><div class="label">Est. Cost</div><div class="value" id="s-cost">—</div><div class="sub">based on Kimchi pricing</div></div>
   </div>
+
+  <div class="section">
+    <h2><span class="icon">🔑</span> API Keys</h2>
+    <div class="key-grid">
+      <div class="key-card blue"><div class="num" id="k-total">—</div><div class="lbl">Total Keys</div></div>
+      <div class="key-card green"><div class="num" id="k-active">—</div><div class="lbl">Active</div></div>
+      <div class="key-card red"><div class="num" id="k-exhausted">—</div><div class="lbl">Exhausted</div></div>
+      <div class="key-card yellow"><div class="num" id="k-errors">—</div><div class="lbl">Total Errors</div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2><span class="icon">🔴</span> Errors</h2>
+    <table class="err-table">
+      <thead><tr><th>#</th><th>Req</th><th>Model</th><th>Key</th><th>Status</th><th>Error</th><th>When</th></tr></thead>
+      <tbody id="err-body"><tr><td colspan="7" style="text-align:center;color:#4a4a5a">No errors yet</td></tr></tbody>
+    </table>
+  </div>
+
   <div class="section">
     <h2><span class="icon">📋</span> Recent Requests</h2>
     <table>
       <thead><tr><th>#</th><th>Model</th><th>In / Out</th><th>Key</th><th>Status</th><th>Time</th><th>When</th></tr></thead>
-      <tbody id="req-body"><tr><td colspan="7" style="text-align:center;color:#4a4a5a">Loading...</td></tr></tbody>
+      <tbody id="req-body"><tr><td colspan="7" style="text-align:center;color:#4a4a5a">No requests yet</td></tr></tbody>
     </table>
   </div>
+
   <div class="section">
     <h2><span class="icon">🖥️</span> Console</h2>
     <div class="console">
@@ -153,6 +186,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 function fmt(n){if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toLocaleString()}
 function ago(ts){const s=Math.floor((Date.now()-ts)/1000);if(s<60)return s+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';return Math.floor(s/86400)+'d ago'}
 function time(ts){return new Date(ts).toLocaleTimeString()}
+function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
 async function load(){
   try{
     const r=await fetch('/api/dashboard?action=stats');
@@ -162,11 +196,20 @@ async function load(){
     document.getElementById('s-in').textContent=fmt(d.totalInputTokens);
     document.getElementById('s-out').textContent=fmt(d.totalOutputTokens);
     document.getElementById('s-cost').textContent='~$'+d.estimatedCost.toFixed(2);
+    if(d.keys){
+      document.getElementById('k-total').textContent=d.keys.total;
+      document.getElementById('k-active').textContent=d.keys.active;
+      document.getElementById('k-exhausted').textContent=d.keys.exhausted;
+      document.getElementById('k-errors').textContent=d.totalErrors;
+    }
+    const etbody=document.getElementById('err-body');
+    if(!d.errors||d.errors.length===0){etbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:#4a4a5a">No errors</td></tr>'}
+    else{etbody.innerHTML=d.errors.map(e=>'<tr><td>'+e.id+'</td><td>#'+e.request_id+'</td><td><code>'+esc(e.model)+'</code></td><td>#'+e.keyIndex+'</td><td><span class="badge err">'+e.status+'</span></td><td class="error-msg" title="'+esc(e.error)+'">'+esc(e.error)+'</td><td>'+ago(e.timestamp)+'</td></tr>').join('')}
     const tbody=document.getElementById('req-body');
     if(d.recentRequests.length===0){tbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:#4a4a5a">No requests yet</td></tr>';return}
-    tbody.innerHTML=d.recentRequests.map(r=>'<tr><td>'+r.id+'</td><td><code>'+r.model+'</code></td><td>'+fmt(r.inputTokens)+' / '+fmt(r.outputTokens)+'</td><td>#'+r.keyIndex+'</td><td><span class="badge '+(r.status<400?'ok':'err')+'">'+r.status+'</span></td><td>'+r.elapsed+'ms</td><td>'+ago(r.timestamp)+'</td></tr>').join('');
+    tbody.innerHTML=d.recentRequests.map(r=>'<tr><td>'+r.id+'</td><td><code>'+esc(r.model)+'</code></td><td>'+fmt(r.inputTokens)+' / '+fmt(r.outputTokens)+'</td><td>#'+r.keyIndex+'</td><td><span class="badge '+(r.status<400?'ok':'err')+'">'+r.status+'</span></td><td>'+r.elapsed+'ms</td><td>'+ago(r.timestamp)+'</td></tr>').join('');
     document.getElementById('log-count').textContent=d.logs.length+' entries';
-    document.getElementById('log-body').innerHTML=d.logs.slice(0,100).map(l=>'<div class="log-entry"><span class="log-time">'+time(l.timestamp)+'</span><span class="log-level '+l.level+'">'+l.level.toUpperCase()+'</span><span class="log-msg">'+l.message+'</span></div>').join('');
+    document.getElementById('log-body').innerHTML=d.logs.slice(0,100).map(l=>'<div class="log-entry"><span class="log-time">'+time(l.timestamp)+'</span><span class="log-level '+l.level+'">'+l.level.toUpperCase()+'</span><span class="log-msg">'+esc(l.message)+'</span></div>').join('');
   }catch(e){}
 }
 load();

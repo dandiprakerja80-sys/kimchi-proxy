@@ -1,6 +1,6 @@
 const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
 const { proxyToKimchi, proxyToKimchiStreaming, writeResponse, streamResponse } = require("../../lib/proxy.js");
-const { logRequest } = require("../../lib/stats.js");
+const { logRequest, setKeyTotal } = require("../../lib/stats.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 
@@ -19,6 +19,8 @@ module.exports = async function handler(req, res) {
     if (keys.length === 0) {
       return res.status(500).json({ error: "No API keys configured. Set KIMCHI_API_KEYS env var." });
     }
+
+    setKeyTotal(keys.length);
 
     const keyIndexHeader = req.headers["x-kimchi-key-index"];
     let preferredIndex = undefined;
@@ -138,6 +140,8 @@ module.exports = async function handler(req, res) {
       inputTokens: 0,
       outputTokens: 0,
       method: "POST",
+      error: err.message,
+      details: err.stack,
     });
 
     return res.status(502).json({
