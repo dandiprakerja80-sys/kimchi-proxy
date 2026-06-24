@@ -1,8 +1,246 @@
+const https = require("https");
+const http = require("http");
+const { URL } = require("url");
 const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
-const { proxyToKimchi, proxyToKimchiStreaming, writeResponse, streamResponse } = require("../../lib/proxy.js");
+const { proxyToKimchi, proxyToKimchiStreaming, writeResponse } = require("../../lib/proxy.js");
 const { logRequest, getStats } = require("../../lib/stats.js");
+const { KIMCHI_CLI_HEADERS } = require("../../lib/proxy.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
+const AUTO_CONTINUE_MAX = 3;
+const AUTO_CONTINUE_TIMEOUT_MS = 55000;
+
+const SKIP_HEADERS = new Set(["transfer-encoding", "connection", "content-length"]);
+
+function requestUpstreamRaw(options) {
+  return new Promise((resolve, reject) => {
+    const { url, method, headers, body, signal } = options;
+    const parsed = new URL(url);
+    const lib = parsed.protocol === "https:" ? https : http;
+    const reqHeaders = { ...headers, "Content-Length": Buffer.byteLength(body || "") };
+    const req = lib.request(
+      { hostname: parsed.hostname, port: parsed.port || 443, path: parsed.pathname + parsed.search, method, headers: reqHeaders },
+      (res) => { resolve({ status: res.statusCode, headers: res.headers, stream: res }); },
+    );
+    req.on("error", reject);
+    if (signal) {
+      if (signal.aborted) { req.destroy(); reject(new Error("aborted")); return; }
+      signal.addEventListener("abort", () => { req.destroy(); reject(new Error("aborted")); }, { once: true });
+    }
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+function extractOutputText(sseEvents) {
+  let text = "";
+  for (const line of sseEvents) {
+    if (!line.startsWith("data: ")) continue;
+    const data = line.slice(6);
+    if (data === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(data);
+      if (parsed.choices && parsed.choices[0] && parsed.choices[0].delta && parsed.choices[0].delta.content) {
+        text += parsed.choices[0].delta.content;
+      }
+    } catch {}
+  }
+  return text;
+}
+
+function buildContinueBody(originalBody, partialOutput) {
+  const messages = [...(originalBody.messages || [])];
+  if (partialOutput) {
+    messages.push({ role: "assistant", content: partialOutput });
+  }
+  return { ...originalBody, messages };
+}
+
+function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey, startTime) {
+  return new Promise((resolve, reject) => {
+    const stream = initialResult.stream;
+    let done = false;
+    let buffer = "";
+    const allLines = [];
+    let lastDataTime = Date.now();
+
+    const keepalive = setInterval(() => {
+      if (!done && Date.now() - lastDataTime > 10000) {
+        try { clientRes.write(": keepalive\n\n"); } catch {}
+        lastDataTime = Date.now();
+      }
+    }, 5000);
+
+    function finish() {
+      clearInterval(keepalive);
+      done = true;
+      if (!clientRes.writableEnded) {
+        try { clientRes.end(); } catch {}
+      }
+      resolve();
+    }
+
+    stream.on("data", (chunk) => {
+      lastDataTime = Date.now();
+      const text = chunk.toString("utf-8");
+      buffer += text;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          allLines.push(`data: ${data}`);
+          if (data === "[DONE]") {
+            finish();
+            return;
+          }
+          try { clientRes.write(`data: ${data}\n\n`); } catch {}
+        } else if (line.startsWith(":")) {
+          // SSE comment, skip
+        }
+      }
+    });
+
+    stream.on("end", () => {
+      if (buffer.trim()) {
+        allLines.push(buffer.trim());
+        if (buffer.startsWith("data: ")) {
+          const data = buffer.slice(6);
+          if (data === "[DONE]") {
+            finish();
+            return;
+          }
+          try { clientRes.write(`data: ${data}\n\n`); } catch {}
+        }
+      }
+
+      if (allLines.some(l => l === "data: [DONE]")) {
+        finish();
+        return;
+      }
+
+      const partialOutput = extractOutputText(allLines);
+      console.log(`[auto-continue] stream incomplete, partial output: ${partialOutput.length} chars`);
+
+      autoContinue(body, keys, getNextKey, clientRes, partialOutput, startTime, 1)
+        .then(() => finish())
+        .catch(() => finish());
+    });
+
+    stream.on("error", () => {
+      clearInterval(keepalive);
+      const partialOutput = extractOutputText(allLines);
+      if (allLines.some(l => l === "data: [DONE]")) {
+        finish();
+        return;
+      }
+      autoContinue(body, keys, getNextKey, clientRes, partialOutput, startTime, 1)
+        .then(() => finish())
+        .catch(() => finish());
+    });
+
+    stream.on("close", () => {
+      if (!done) {
+        clearInterval(keepalive);
+        if (allLines.some(l => l === "data: [DONE]")) {
+          finish();
+          return;
+        }
+        const partialOutput = extractOutputText(allLines);
+        autoContinue(body, keys, getNextKey, clientRes, partialOutput, startTime, 1)
+          .then(() => finish())
+          .catch(() => finish());
+      }
+    });
+  });
+}
+
+async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, startTime, attempt) {
+  if (attempt > AUTO_CONTINUE_MAX) {
+    console.log(`[auto-continue] max attempts reached`);
+    return;
+  }
+  if (Date.now() - startTime > 55000) {
+    console.log(`[auto-continue] timeout approaching, aborting`);
+    return;
+  }
+
+  console.log(`[auto-continue] attempt ${attempt}, resuming from ${partialOutput.length} chars`);
+
+  const continueBody = buildContinueBody(body, partialOutput);
+
+  try {
+    const result = await requestUpstreamRaw({
+      url: KIMCHI_UPSTREAM,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${getNextKey().key}`,
+        ...KIMCHI_CLI_HEADERS,
+      },
+      body: JSON.stringify(continueBody),
+      signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
+    });
+
+    if (result.status !== 200) {
+      console.log(`[auto-continue] upstream returned ${result.status}`);
+      return;
+    }
+
+    let buffer = "";
+    const allLines = [];
+    let lastDataTime = Date.now();
+
+    const keepalive = setInterval(() => {
+      if (Date.now() - lastDataTime > 10000) {
+        try { clientRes.write(": keepalive\n\n"); } catch {}
+        lastDataTime = Date.now();
+      }
+    }, 5000);
+
+    await new Promise((res, rej) => {
+      let finished = false;
+      const finish = () => { if (!finished) { finished = true; clearInterval(keepalive); res(); } };
+
+      result.stream.on("data", (chunk) => {
+        lastDataTime = Date.now();
+        const text = chunk.toString("utf-8");
+        buffer += text;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6);
+            allLines.push(`data: ${data}`);
+            if (data === "[DONE]") { finish(); return; }
+            try { clientRes.write(`data: ${data}\n\n`); } catch {}
+          }
+        }
+      });
+
+      result.stream.on("end", () => {
+        if (buffer.trim()) {
+          allLines.push(buffer.trim());
+          if (buffer.startsWith("data: ")) {
+            const data = buffer.slice(6);
+            if (data !== "[DONE]") try { clientRes.write(`data: ${data}\n\n`); } catch {}
+          }
+        }
+        finish();
+      });
+
+      result.stream.on("error", finish);
+      result.stream.on("close", finish);
+    });
+
+    if (!allLines.some(l => l === "data: [DONE]")) {
+      const newPartial = extractOutputText(allLines);
+      await autoContinue(body, keys, getNextKey, clientRes, partialOutput + newPartial, startTime, attempt + 1);
+    }
+  } catch (err) {
+    console.error(`[auto-continue] error:`, err.message);
+  }
+}
 
 module.exports = async function handler(req, res) {
   if (req.method === "GET" && req.url && req.url.includes("action=stats")) {
@@ -70,26 +308,24 @@ module.exports = async function handler(req, res) {
         getNextKey,
         requestBody: body,
         requestHeaders: { "X-Request-Start": String(Date.now()) },
-        signal: AbortSignal.timeout(55000),
+        signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
       });
 
-      const elapsed = Date.now() - startTime;
       res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
       res.setHeader("X-Proxy-Key-Total", String(keys.length));
       res.setHeader("X-Proxy-Attempts", String(result.attempts));
-      res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
 
       logRequest({
         model,
         status: result.status,
-        elapsed,
+        elapsed: Date.now() - startTime,
         keyIndex: lastKeyIndex,
         inputTokens: body.messages ? body.messages.reduce((s, m) => s + (m.content || "").length / 4, 0) : 0,
         outputTokens: 0,
         method: "POST",
       });
 
-      streamResponse(res, result);
+      await streamWithAutoContinue(res, result, body, keys, getNextKey, startTime);
     } else {
       const result = await proxyToKimchi({
         upstreamUrl: KIMCHI_UPSTREAM,

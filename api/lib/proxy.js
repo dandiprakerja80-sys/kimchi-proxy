@@ -9,6 +9,8 @@ const BASE_DELAY_MS = 200;
 const MAX_DELAY_MS = 5000;
 const BACKOFF_FACTOR = 1.5;
 const FETCH_TIMEOUT_MS = 15000;
+const AUTO_CONTINUE_MAX = 3;
+const KEEPALIVE_INTERVAL_MS = 10000;
 
 const KIMCHI_CLI_HEADERS = {
   "User-Agent": "kimchi/0.1.34",
@@ -105,7 +107,7 @@ function requestUpstream(options) {
 
 function requestUpstreamStreaming(options) {
   return new Promise((resolve, reject) => {
-    const { url, method, headers, body, timeoutMs, signal } = options;
+    const { url, method, headers, body, signal } = options;
     const parsed = new URL(url);
     const lib = parsed.protocol === "https:" ? https : http;
 
@@ -118,7 +120,6 @@ function requestUpstreamStreaming(options) {
         path: parsed.pathname + parsed.search,
         method,
         headers: reqHeaders,
-        timeout: timeoutMs,
       },
       (res) => {
         resolve({
@@ -130,10 +131,6 @@ function requestUpstreamStreaming(options) {
     );
 
     req.on("error", reject);
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error("Request timeout"));
-    });
 
     if (signal) {
       if (signal.aborted) {
@@ -269,7 +266,6 @@ async function proxyToKimchiStreaming(options) {
           "X-Proxy-Key-Index": String(keyInfo.index),
         },
         body: requestBody ? JSON.stringify(requestBody) : undefined,
-        timeoutMs: timeoutMs * 3,
         signal,
       });
 
@@ -305,7 +301,7 @@ function writeResponse(clientRes, result) {
   clientRes.end(body);
 }
 
-function streamResponse(clientRes, result) {
+function streamResponse(clientRes, result, options = {}) {
   const skipHeaders = new Set(["transfer-encoding", "connection", "content-length"]);
   for (const [key, value] of Object.entries(result.headers)) {
     if (!skipHeaders.has(key.toLowerCase())) {
@@ -315,10 +311,94 @@ function streamResponse(clientRes, result) {
 
   clientRes.setHeader("Content-Type", "text/event-stream");
   clientRes.setHeader("Cache-Control", "no-cache");
-  clientRes.setHeader("Connection", "keep-alive");
+  clientRes.setHeader("Connection", "keepalive");
+  clientRes.setHeader("X-Accel-Buffering", "no");
   clientRes.status(result.status);
 
-  result.stream.pipe(clientRes);
+  const stream = result.stream;
+  let done = false;
+  let lastDataTime = Date.now();
+  let buffer = "";
+  let hasContent = false;
+  let hasReasoning = false;
+
+  const keepalive = setInterval(() => {
+    if (!done && Date.now() - lastDataTime > KEEPALIVE_INTERVAL_MS) {
+      try {
+        clientRes.write(": keepalive\n\n");
+        lastDataTime = Date.now();
+      } catch {}
+    }
+  }, 5000);
+
+  stream.on("data", (chunk) => {
+    lastDataTime = Date.now();
+    const text = chunk.toString("utf-8");
+    buffer += text;
+
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      if (line.startsWith("data: ")) {
+        const data = line.slice(6);
+        if (data === "[DONE]") {
+          done = true;
+          try {
+            clientRes.write(`data: [DONE]\n\n`);
+          } catch {}
+        } else {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.choices && parsed.choices[0]) {
+              const delta = parsed.choices[0].delta;
+              if (delta && delta.reasoning_content !== undefined) {
+                hasReasoning = true;
+              }
+              if (delta && delta.content !== undefined) {
+                hasContent = true;
+              }
+            }
+          } catch {}
+          try {
+            clientRes.write(`data: ${data}\n\n`);
+          } catch {}
+        }
+      } else if (line.trim() === "") {
+        // empty line, ignore
+      } else if (line.startsWith(":")) {
+        // SSE comment, ignore
+      }
+    }
+  });
+
+  stream.on("end", () => {
+    clearInterval(keepalive);
+    done = true;
+    if (!clientRes.writableEnded) {
+      try {
+        clientRes.end();
+      } catch {}
+    }
+  });
+
+  stream.on("error", (err) => {
+    clearInterval(keepalive);
+    if (!clientRes.writableEnded) {
+      try {
+        clientRes.end();
+      } catch {}
+    }
+  });
+
+  stream.on("close", () => {
+    clearInterval(keepalive);
+    if (!clientRes.writableEnded) {
+      try {
+        clientRes.end();
+      } catch {}
+    }
+  });
 }
 
-module.exports = { proxyToKimchi, proxyToKimchiStreaming, writeResponse, streamResponse };
+module.exports = { proxyToKimchi, proxyToKimchiStreaming, writeResponse, streamResponse, KIMCHI_CLI_HEADERS };
