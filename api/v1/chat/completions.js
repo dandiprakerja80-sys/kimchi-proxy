@@ -48,6 +48,21 @@ function extractOutputText(sseEvents) {
   return text;
 }
 
+function isStreamComplete(allLines) {
+  for (let i = allLines.length - 1; i >= 0; i--) {
+    const line = allLines[i];
+    if (line === "data: [DONE]") return true;
+    if (line.startsWith("data: ")) {
+      try {
+        const parsed = JSON.parse(line.slice(6));
+        if (parsed.choices && parsed.choices[0] && parsed.choices[0].finish_reason) return true;
+      } catch {}
+      return false;
+    }
+  }
+  return false;
+}
+
 function buildContinueBody(originalBody, partialOutput) {
   const messages = [...(originalBody.messages || [])];
   if (partialOutput) {
@@ -114,7 +129,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
         }
       }
 
-      if (allLines.some(l => l === "data: [DONE]")) {
+      if (isStreamComplete(allLines)) {
         finish();
         return;
       }
@@ -130,7 +145,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
     stream.on("error", () => {
       clearInterval(keepalive);
       const partialOutput = extractOutputText(allLines);
-      if (allLines.some(l => l === "data: [DONE]")) {
+      if (isStreamComplete(allLines)) {
         finish();
         return;
       }
@@ -142,7 +157,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
     stream.on("close", () => {
       if (!done) {
         clearInterval(keepalive);
-        if (allLines.some(l => l === "data: [DONE]")) {
+        if (isStreamComplete(allLines)) {
           finish();
           return;
         }
@@ -233,7 +248,7 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
       result.stream.on("close", finish);
     });
 
-    if (!allLines.some(l => l === "data: [DONE]")) {
+    if (!isStreamComplete(allLines)) {
       const newPartial = extractOutputText(allLines);
       await autoContinue(body, keys, getNextKey, clientRes, partialOutput + newPartial, startTime, attempt + 1);
     }
