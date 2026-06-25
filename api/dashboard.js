@@ -5,7 +5,9 @@ function getSessionSecret() {
 }
 
 function verifyPassword(password) {
-  return password === getSessionSecret();
+  const secret = getSessionSecret();
+  console.log(`[dashboard] login attempt - password length: ${password ? password.length : 0}, env length: ${secret ? secret.length : 0}, env set: ${!!process.env.DASHBOARD_PASSWORD}`);
+  return password === secret;
 }
 
 function generateToken() {
@@ -304,6 +306,13 @@ module.exports = async function handler(req, res) {
     } catch (e) {
       return res.status(200).json({ totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCost: "0.00", totalErrors: 0, requests: [], errors: [], keys: { total: 55, active: 55, exhausted: 0, throttled: 0, errors: [] }, recentRequests: [] });
     }
+  }
+
+  if (req.url === "/api/debug/env") {
+    return res.status(200).json({
+      dashboard_password_set: !!process.env.DASHBOARD_PASSWORD,
+      dashboard_password_length: process.env.DASHBOARD_PASSWORD ? process.env.DASHBOARD_PASSWORD.length : 0,
+    });
   }
 
   res.setHeader("Content-Type", "text/html");
