@@ -8,8 +8,9 @@ const { KIMCHI_CLI_HEADERS } = require("../../lib/proxy.js");
 const { validateProxyApiKey } = require("../../lib/auth.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
-const AUTO_CONTINUE_MAX = 3;
-const AUTO_CONTINUE_TIMEOUT_MS = 55000;
+const AUTO_CONTINUE_MAX = 5;
+const AUTO_CONTINUE_TIMEOUT_MS = 120000;
+const DEFAULT_MAX_TOKENS = 16384;
 
 const SKIP_HEADERS = new Set(["transfer-encoding", "connection", "content-length"]);
 
@@ -70,6 +71,52 @@ function buildContinueBody(originalBody, partialOutput) {
     messages.push({ role: "assistant", content: partialOutput });
   }
   return { ...originalBody, messages };
+}
+
+function extractMessageContent(parsed) {
+  try {
+    return parsed.choices[0].message.content || "";
+  } catch {
+    return "";
+  }
+}
+
+function extractMessageReasoning(parsed) {
+  try {
+    return parsed.choices[0].message.reasoning_content || "";
+  } catch {
+    return "";
+  }
+}
+
+function mergeResponses(base, continuation) {
+  try {
+    const baseContent = extractMessageContent(base);
+    const contContent = extractMessageContent(continuation);
+    base.choices[0].message.content = baseContent + contContent;
+
+    const baseReasoning = extractMessageReasoning(base);
+    const contReasoning = extractMessageReasoning(continuation);
+    if (baseReasoning || contReasoning) {
+      base.choices[0].message.reasoning_content = baseReasoning + contReasoning;
+    }
+
+    if (continuation.choices && continuation.choices[0]) {
+      base.choices[0].finish_reason = continuation.choices[0].finish_reason;
+      if (continuation.choices[0].index !== undefined) {
+        base.choices[0].index = continuation.choices[0].index;
+      }
+    }
+
+    if (base.usage && continuation.usage) {
+      base.usage.completion_tokens = (base.usage.completion_tokens || 0) + (continuation.usage.completion_tokens || 0);
+      base.usage.prompt_tokens = (base.usage.prompt_tokens || 0) + (continuation.usage.prompt_tokens || 0);
+      base.usage.total_tokens = (base.usage.total_tokens || 0) + (continuation.usage.total_tokens || 0);
+    }
+  } catch (err) {
+    console.error("[mergeResponses] error:", err.message);
+  }
+  return base;
 }
 
 function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey, startTime) {
@@ -176,7 +223,7 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
     console.log(`[auto-continue] max attempts reached`);
     return;
   }
-  if (Date.now() - startTime > 55000) {
+  if (Date.now() - startTime > AUTO_CONTINUE_TIMEOUT_MS) {
     console.log(`[auto-continue] timeout approaching, aborting`);
     return;
   }
@@ -318,6 +365,10 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: "Invalid request body" });
     }
 
+    if (body.max_tokens === undefined || body.max_tokens === null) {
+      body.max_tokens = DEFAULT_MAX_TOKENS;
+    }
+
     model = body.model || "unknown";
     startTime = Date.now();
     const isStreaming = body.stream === true;
@@ -347,14 +398,79 @@ module.exports = async function handler(req, res) {
 
       await streamWithAutoContinue(res, result, body, keys, getNextKey, startTime);
     } else {
-      const result = await proxyToKimchi({
+      let result = await proxyToKimchi({
         upstreamUrl: KIMCHI_UPSTREAM,
         getNextKey,
         requestBody: body,
         requestHeaders: { "X-Request-Start": String(Date.now()) },
         maxRetries: Math.min(keys.length, 55),
-        signal: AbortSignal.timeout(55000),
+        signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
       });
+
+      if (result.status === 200) {
+        let finalBody;
+        try {
+          finalBody = JSON.parse(result.body);
+        } catch {
+          finalBody = null;
+        }
+
+        if (finalBody) {
+          let continued = false;
+          let autoContinueAttempts = 0;
+
+          for (let attempt = 1; attempt <= AUTO_CONTINUE_MAX; attempt++) {
+            const finishReason = finalBody.choices?.[0]?.finish_reason;
+            const content = extractMessageContent(finalBody);
+            const reasoning = extractMessageReasoning(finalBody);
+
+            const shouldContinue = finishReason === "length" || (!content && reasoning);
+            if (!shouldContinue) {
+              break;
+            }
+            if (Date.now() - startTime > AUTO_CONTINUE_TIMEOUT_MS) {
+              console.log(`[auto-continue] non-streaming timeout approaching`);
+              break;
+            }
+
+            continued = true;
+            autoContinueAttempts++;
+            console.log(`[auto-continue] non-streaming attempt ${attempt}, content: ${content.length} chars, reasoning: ${reasoning.length} chars`);
+
+            const continueResult = await proxyToKimchi({
+              upstreamUrl: KIMCHI_UPSTREAM,
+              getNextKey,
+              requestBody: buildContinueBody(body, content),
+              requestHeaders: { "X-Request-Start": String(Date.now()) },
+              maxRetries: Math.min(keys.length, 55),
+              signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
+            });
+
+            if (continueResult.status !== 200) {
+              break;
+            }
+
+            let continueBodyParsed;
+            try {
+              continueBodyParsed = JSON.parse(continueResult.body);
+            } catch {
+              break;
+            }
+
+            finalBody = mergeResponses(finalBody, continueBodyParsed);
+
+            if (finalBody.choices?.[0]?.finish_reason !== "length" && extractMessageContent(finalBody)) {
+              break;
+            }
+          }
+
+          result.body = JSON.stringify(finalBody);
+          res.setHeader("X-Proxy-Continued", String(continued));
+          if (continued) {
+            res.setHeader("X-Proxy-Continue-Attempts", String(autoContinueAttempts));
+          }
+        }
+      }
 
       const elapsed = Date.now() - startTime;
       res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
