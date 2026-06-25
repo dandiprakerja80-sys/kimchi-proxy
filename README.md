@@ -1,6 +1,15 @@
+---
+title: Kimchi Proxy
+emoji: 🌶️
+colorFrom: red
+colorTo: yellow
+sdk: docker
+app_port: 7860
+---
+
 # Kimchi Proxy Server
 
-Vercel-hosted proxy for Kimchi API with multi-API-key rotation. Designed for opencode/claude code integration.
+Multi-key rotating proxy for Kimchi API with multi-API-key rotation. Designed for opencode/claude code integration.
 
 ## Features
 
@@ -12,17 +21,9 @@ Vercel-hosted proxy for Kimchi API with multi-API-key rotation. Designed for ope
 
 ## Setup
 
-### 1. Deploy to Vercel
+### 1. Configure Environment Variables
 
-```bash
-npm i -g vercel
-vercel
-vercel --prod
-```
-
-### 2. Configure Environment Variables
-
-In Vercel dashboard, set:
+In the Hugging Face Space settings, set:
 
 ```
 KIMCHI_API_KEYS=apikey1,apikey2,apikey3
@@ -30,22 +31,22 @@ KIMCHI_API_KEYS=apikey1,apikey2,apikey3
 
 Format: comma-separated or space-separated.
 
-### 3. Configure opencode
+### 2. Configure opencode
 
 ```json
 {
   "llm": {
     "provider": "openai",
-    "baseUrl": "https://your-proxy.vercel.app",
+    "baseUrl": "https://elysiadev11-proxy.hf.space",
     "apiKey": "placeholder"
   }
 }
 ```
 
-### 4. Configure claude code
+### 3. Configure claude code
 
 ```bash
-export ANTHROPIC_BASE_URL="https://your-proxy.vercel.app"
+export ANTHROPIC_BASE_URL="https://elysiadev11-proxy.hf.space"
 export ANTHROPIC_API_KEY="placeholder"
 ```
 
@@ -78,23 +79,17 @@ export ANTHROPIC_API_KEY="placeholder"
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│ opencode/   │────▶│  Vercel      │────▶│  llm.kimchi.dev │
+│ opencode/   │────▶│  HF Space    │────▶│  llm.kimchi.dev │
 │ claude code │     │  Proxy       │     │  (Kimchi API)   │
 └─────────────┘     └──────────────┘     └─────────────────┘
 ```
-
-## Limitations (Vercel Hobby)
-
-- **60s function timeout** - Long chat completions may be cut off
-- **4.5MB request body** - Sufficient for typical prompts
-- **Stateless keys** - Cooldown tracking is in-memory (resets on cold start)
 
 ## Debugging
 
 Check `/health` endpoint to see key status:
 
 ```bash
-curl https://your-proxy.vercel.app/health
+curl https://elysiadev11-proxy.hf.space/health
 ```
 
 Response:
