@@ -271,16 +271,12 @@ module.exports = async function handler(req, res) {
   }
 
   if (req.method === "POST" && req.url === "/api/dashboard") {
-    let body = "";
-    for await (const chunk of req) body += chunk;
-    try {
-      const data = JSON.parse(body);
-      if (verifyPassword(data.password)) {
-        const token = generateToken();
-        res.setHeader("Set-Cookie", `dashboard_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`);
-        return res.status(200).json({ ok: true });
-      }
-    } catch {}
+    const data = req.body || {};
+    if (verifyPassword(data.password)) {
+      const token = generateToken();
+      res.setHeader("Set-Cookie", `dashboard_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`);
+      return res.status(200).json({ ok: true });
+    }
     return res.status(401).json({ error: "Invalid password" });
   }
 
