@@ -47,7 +47,6 @@ const handlers = {
   "/health": () => require("./api/health.js"),
   "/api/dashboard": () => require("./api/dashboard.js"),
   "/dashboard": () => require("./api/dashboard.js"),
-  "/api/debug/env": () => require("./api/dashboard.js"),
 };
 
 const server = http.createServer(async (req, res) => {
