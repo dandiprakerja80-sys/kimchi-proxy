@@ -1,9 +1,11 @@
 
 
-const SESSION_SECRET = process.env.DASHBOARD_PASSWORD || "kimchi-proxy";
+function getSessionSecret() {
+  return process.env.DASHBOARD_PASSWORD || "kimchi-proxy";
+}
 
 function verifyPassword(password) {
-  return password === SESSION_SECRET;
+  return password === getSessionSecret();
 }
 
 function generateToken() {
