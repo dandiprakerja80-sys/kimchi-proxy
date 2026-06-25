@@ -57,6 +57,14 @@ const server = http.createServer(async (req, res) => {
   const path = url.pathname;
 
   try {
+    if (path === "/") {
+      return res.status(200).json({
+        ok: true,
+        name: "Kimchi Proxy",
+        endpoints: ["/v1/chat/completions", "/v1/models", "/health", "/dashboard"],
+      });
+    }
+
     const handlerFactory = handlers[path];
     if (handlerFactory) {
       const handler = handlerFactory();
