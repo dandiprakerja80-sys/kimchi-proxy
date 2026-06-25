@@ -1,6 +1,11 @@
 const { parseKeys, selectKey, throttleKey, getKeyStatus } = require("./lib/key-rotation.js");
+const { validateProxyApiKey } = require("./lib/auth.js");
 
 module.exports = async function handler(req, res) {
+  if (!validateProxyApiKey(req, res)) {
+    return;
+  }
+
   try {
     const keysRaw = process.env.KIMCHI_API_KEYS;
     const keys = parseKeys(keysRaw);

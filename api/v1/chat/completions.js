@@ -5,6 +5,7 @@ const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib
 const { proxyToKimchi, proxyToKimchiStreaming, writeResponse } = require("../../lib/proxy.js");
 const { logRequest, getStats } = require("../../lib/stats.js");
 const { KIMCHI_CLI_HEADERS } = require("../../lib/proxy.js");
+const { validateProxyApiKey } = require("../../lib/auth.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 const AUTO_CONTINUE_MAX = 3;
@@ -258,6 +259,10 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
 }
 
 module.exports = async function handler(req, res) {
+  if (!validateProxyApiKey(req, res)) {
+    return;
+  }
+
   if (req.method === "GET" && req.url && req.url.includes("action=stats")) {
     const url = new URL(req.url, "http://localhost");
     const range = url.searchParams.get("range") || "today";
