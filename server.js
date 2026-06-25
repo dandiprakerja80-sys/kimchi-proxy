@@ -44,6 +44,7 @@ const handlers = {
   "/api/v1/models": () => require("./api/v1/models.js"),
   "/v1/models": () => require("./api/v1/models.js"),
   "/api/health": () => require("./api/health.js"),
+  "/health": () => require("./api/health.js"),
   "/api/dashboard": () => require("./api/dashboard.js"),
   "/dashboard": () => require("./api/dashboard.js"),
 };
