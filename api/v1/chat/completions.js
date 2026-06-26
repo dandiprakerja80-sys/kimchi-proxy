@@ -343,7 +343,7 @@ module.exports = async function handler(req, res) {
   if (req.method === "GET" && req.url && req.url.includes("action=stats")) {
     const url = new URL(req.url, "http://localhost");
     const range = url.searchParams.get("range") || "today";
-    const stats = getStats(range);
+    const stats = await getStats(range);
     return res.status(200).json(stats);
   }
 
@@ -416,7 +416,7 @@ module.exports = async function handler(req, res) {
       res.setHeader("X-Proxy-Attempts", String(result.attempts));
       res.setHeader("X-Proxy-Provider", result.provider || "kimchi");
 
-      logRequest({
+      await logRequest({
         model,
         status: result.status,
         elapsed: Date.now() - startTime,
@@ -518,7 +518,7 @@ module.exports = async function handler(req, res) {
         }
       } catch {}
 
-      logRequest({
+      await logRequest({
         model,
         status: result.status,
         elapsed,
@@ -536,7 +536,7 @@ module.exports = async function handler(req, res) {
     const elapsed = startTime ? Date.now() - startTime : 0;
     const err = error instanceof Error ? error : new Error(String(error));
 
-    logRequest({
+    await logRequest({
       model,
       status: 502,
       elapsed,

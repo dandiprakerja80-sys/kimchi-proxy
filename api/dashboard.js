@@ -111,6 +111,18 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .stat.danger .value{color:#ff4545}
   .stat.warn .value{color:#eab308}
   .stat.ok .value{color:#22c55e}
+  .provider-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:20px;margin-bottom:32px}
+  .provider-card{background:#111118;border:1px solid #1e1e2e;border-radius:14px;padding:24px}
+  .provider-card.kimchi{border-left:4px solid #ff6b35}
+  .provider-card.cf{border-left:4px solid #f48120}
+  .provider-card h3{font-size:16px;font-weight:700;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+  .provider-card.kimchi h3{color:#ff6b35}
+  .provider-card.cf h3{color:#f48120}
+  .provider-metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+  .provider-metrics .pm .num{font-size:22px;font-weight:700;color:#f0f0f5}
+  .provider-metrics .pm .lbl{color:#6b6b80;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-top:2px}
+  .badge-kimchi{background:rgba(255,107,53,.15);color:#ff6b35}
+  .badge-cf{background:rgba(244,129,32,.15);color:#f48120}
   .section{margin-bottom:32px}
   .section h2{font-size:16px;font-weight:600;margin-bottom:16px;display:flex;align-items:center;gap:8px}
   .section h2 .icon{font-size:18px}
@@ -166,6 +178,27 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="stat accent"><div class="label">Est. Cost</div><div class="value" id="s-cost">—</div><div class="sub">based on Kimchi pricing</div></div>
   </div>
 
+  <div class="provider-grid">
+    <div class="provider-card kimchi">
+      <h3>🌶️ Kimchi</h3>
+      <div class="provider-metrics">
+        <div class="pm"><div class="num" id="p-kimchi-req">—</div><div class="lbl">Requests</div></div>
+        <div class="pm"><div class="num" id="p-kimchi-err">—</div><div class="lbl">Errors</div></div>
+        <div class="pm"><div class="num" id="p-kimchi-in">—</div><div class="lbl">Input Tokens</div></div>
+        <div class="pm"><div class="num" id="p-kimchi-out">—</div><div class="lbl">Output Tokens</div></div>
+      </div>
+    </div>
+    <div class="provider-card cf">
+      <h3>☁️ Cloudflare AI</h3>
+      <div class="provider-metrics">
+        <div class="pm"><div class="num" id="p-cf-req">—</div><div class="lbl">Requests</div></div>
+        <div class="pm"><div class="num" id="p-cf-err">—</div><div class="lbl">Errors</div></div>
+        <div class="pm"><div class="num" id="p-cf-in">—</div><div class="lbl">Input Tokens</div></div>
+        <div class="pm"><div class="num" id="p-cf-out">—</div><div class="lbl">Output Tokens</div></div>
+      </div>
+    </div>
+  </div>
+
   <div class="section">
     <h2><span class="icon">🔑</span> API Keys</h2>
     <div class="key-grid">
@@ -179,16 +212,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <div class="section">
     <h2><span class="icon">🔴</span> Errors</h2>
     <table class="err-table">
-      <thead><tr><th>#</th><th>Req</th><th>Model</th><th>Key</th><th>Status</th><th>Error</th><th>When</th></tr></thead>
-      <tbody id="err-body"><tr><td colspan="7" style="text-align:center;color:#4a4a5a">No errors yet</td></tr></tbody>
+      <thead><tr><th>#</th><th>Req</th><th>Provider</th><th>Model</th><th>Key</th><th>Status</th><th>Error</th><th>When</th></tr></thead>
+      <tbody id="err-body"><tr><td colspan="8" style="text-align:center;color:#4a4a5a">No errors yet</td></tr></tbody>
     </table>
   </div>
 
   <div class="section">
     <h2><span class="icon">📋</span> Recent Requests</h2>
     <table>
-      <thead><tr><th>#</th><th>Model</th><th>In / Out</th><th>Key</th><th>Status</th><th>Time</th><th>When</th></tr></thead>
-      <tbody id="req-body"><tr><td colspan="7" style="text-align:center;color:#4a4a5a">No requests yet</td></tr></tbody>
+      <thead><tr><th>#</th><th>Provider</th><th>Model</th><th>In / Out</th><th>Key</th><th>Status</th><th>Time</th><th>When</th></tr></thead>
+      <tbody id="req-body"><tr><td colspan="8" style="text-align:center;color:#4a4a5a">No requests yet</td></tr></tbody>
     </table>
   </div>
 
@@ -242,12 +275,23 @@ async function load(){
       document.getElementById('k-exhausted').textContent=d.keys.exhausted;
       document.getElementById('k-errors').textContent=d.totalErrors;
     }
+    const kimchi=d.providers?.kimchi||{requests:0,inputTokens:0,outputTokens:0,errors:0};
+    const cf=d.providers?.cf||{requests:0,inputTokens:0,outputTokens:0,errors:0};
+    document.getElementById('p-kimchi-req').textContent=fmt(kimchi.requests);
+    document.getElementById('p-kimchi-err').textContent=fmt(kimchi.errors);
+    document.getElementById('p-kimchi-in').textContent=fmt(kimchi.inputTokens);
+    document.getElementById('p-kimchi-out').textContent=fmt(kimchi.outputTokens);
+    document.getElementById('p-cf-req').textContent=fmt(cf.requests);
+    document.getElementById('p-cf-err').textContent=fmt(cf.errors);
+    document.getElementById('p-cf-in').textContent=fmt(cf.inputTokens);
+    document.getElementById('p-cf-out').textContent=fmt(cf.outputTokens);
+    function providerBadge(p){const provider=p||'kimchi'; return '<span class="badge '+(provider==='cf'?'badge-cf':'badge-kimchi')+'">'+(provider==='cf'?'CF':'Kimchi')+'</span>';}
     const etbody=document.getElementById('err-body');
-    if(!d.errors||d.errors.length===0){etbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:#4a4a5a">No errors</td></tr>'}
-    else{etbody.innerHTML=d.errors.map(e=>'<tr><td>'+e.id+'</td><td>#'+e.request_id+'</td><td><code>'+esc(e.model)+'</code></td><td>#'+e.keyIndex+'</td><td><span class="badge err">'+e.status+'</span></td><td class="error-msg" title="'+esc(e.error)+'">'+esc(e.error)+'</td><td>'+ago(e.timestamp)+'</td></tr>').join('')}
+    if(!d.errors||d.errors.length===0){etbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4a4a5a">No errors</td></tr>'}
+    else{etbody.innerHTML=d.errors.map(e=>'<tr><td>'+e.id+'</td><td>#'+e.request_id+'</td><td>'+providerBadge(e.provider)+'</td><td><code>'+esc(e.model)+'</code></td><td>#'+e.keyIndex+'</td><td><span class="badge err">'+e.status+'</span></td><td class="error-msg" title="'+esc(e.error)+'">'+esc(e.error)+'</td><td>'+ago(e.timestamp)+'</td></tr>').join('')}
     const tbody=document.getElementById('req-body');
-    if(d.recentRequests.length===0){tbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:#4a4a5a">No requests yet</td></tr>';return}
-    tbody.innerHTML=d.recentRequests.map(r=>'<tr><td>'+r.id+'</td><td><code>'+esc(r.model)+'</code></td><td>'+fmt(r.inputTokens)+' / '+fmt(r.outputTokens)+'</td><td>#'+r.keyIndex+'</td><td><span class="badge '+(r.status<400?'ok':'err')+'">'+r.status+'</span></td><td>'+r.elapsed+'ms</td><td>'+ago(r.timestamp)+'</td></tr>').join('');
+    if(d.recentRequests.length===0){tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4a4a5a">No requests yet</td></tr>';return}
+    tbody.innerHTML=d.recentRequests.map(r=>'<tr><td>'+r.id+'</td><td>'+providerBadge(r.provider)+'</td><td><code>'+esc(r.model)+'</code></td><td>'+fmt(r.inputTokens)+' / '+fmt(r.outputTokens)+'</td><td>#'+r.keyIndex+'</td><td><span class="badge '+(r.status<400?'ok':'err')+'">'+r.status+'</span></td><td>'+r.elapsed+'ms</td><td>'+ago(r.timestamp)+'</td></tr>').join('');
     document.getElementById('log-count').textContent=d.logs.length+' entries';
     document.getElementById('log-body').innerHTML=d.logs.slice(0,100).map(l=>'<div class="log-entry"><span class="log-time">'+time(l.timestamp)+'</span><span class="log-level '+l.level+'">'+l.level.toUpperCase()+'</span><span class="log-msg">'+esc(l.message)+'</span></div>').join('');
   }catch(e){}
@@ -302,12 +346,15 @@ module.exports = async function handler(req, res) {
     try {
       const statsUrl = `https://${req.headers.host}/api/v1/chat/completions?action=stats&range=${range}`;
       const statsRes = await fetch(statsUrl, {
-        headers: { Cookie: req.headers.cookie || "" },
+        headers: {
+          Cookie: req.headers.cookie || "",
+          Authorization: `Bearer ${process.env.PROXY_API_KEY || "kimchi-proxy-free"}`,
+        },
       });
       const stats = await statsRes.json();
       return res.status(200).json(stats);
     } catch (e) {
-      return res.status(200).json({ totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCost: "0.00", totalErrors: 0, requests: [], errors: [], keys: { total: 55, active: 55, exhausted: 0, throttled: 0, errors: [] }, recentRequests: [] });
+      return res.status(200).json({ totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCost: 0, totalErrors: 0, providers: {}, requests: [], errors: [], keys: { total: 55, active: 55, exhausted: 0, throttled: 0, errors: [] }, recentRequests: [] });
     }
   }
 
