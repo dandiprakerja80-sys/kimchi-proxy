@@ -269,7 +269,16 @@ module.exports = async function handler(req, res) {
   }
 
   if (req.method === "POST" && req.url === "/api/dashboard") {
-    const data = req.body || {};
+    let data = req.body;
+    if (!data || typeof data !== "object") {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = {};
+      }
+    }
     if (verifyPassword(data.password)) {
       const token = generateToken();
       res.setHeader("Set-Cookie", `dashboard_token=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`);

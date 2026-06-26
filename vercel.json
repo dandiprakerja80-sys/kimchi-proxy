@@ -5,6 +5,10 @@
       "destination": "/api/v1/:path*"
     },
     {
+      "source": "/health",
+      "destination": "/api/health"
+    },
+    {
       "source": "/dashboard",
       "destination": "/api/dashboard"
     },
