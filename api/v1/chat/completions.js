@@ -9,7 +9,7 @@ const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 const AUTO_CONTINUE_MAX = 5;
 const AUTO_CONTINUE_TIMEOUT_MS = 120000;
 const DEFAULT_MAX_TOKENS = 16384;
-const CF_MAX_TOKENS = 8192;
+const CF_MAX_TOKENS = 16384;
 const CF_STOP_CONTINUE_MAX = 2;
 
 const SKIP_HEADERS = new Set(["transfer-encoding", "connection", "content-length"]);
@@ -242,9 +242,9 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
       if (reason !== "stop") return false;
       const output = extractOutputText(lines);
       const reasoning = extractOutputReasoning(lines);
-      // Premature if no content but reasoning exists, or content very short compared to reasoning
+      // Premature if no content but reasoning exists, or content still short despite reasoning
       if (!output && reasoning.length > 0) return true;
-      if (output.length < 100 && reasoning.length > output.length * 2) return true;
+      if (output.length < 500 && reasoning.length > 0) return true;
       return false;
     }
 
@@ -278,9 +278,13 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
             outputTokens += Math.ceil((content.length + reasoning.length) / 4);
             const fr = choice?.finish_reason;
             if (fr) {
-              console.log(`[cf-chunk] finish:${fr} content:${content.length} reasoning:${reasoning.length} totalOut:${outputTokens}`);
+              const msg = `[cf-chunk] finish:${fr} content:${content.length} reasoning:${reasoning.length} totalOut:${outputTokens}`;
+              console.log(msg);
+              addLog({ level: "info", message: msg, timestamp: Date.now() }).catch(() => {});
             } else if (content.length > 0 || reasoning.length > 0) {
-              console.log(`[cf-chunk] content:${content.length} reasoning:${reasoning.length} totalOut:${outputTokens}`);
+              const msg = `[cf-chunk] content:${content.length} reasoning:${reasoning.length} totalOut:${outputTokens}`;
+              console.log(msg);
+              addLog({ level: "info", message: msg, timestamp: Date.now() }).catch(() => {});
             }
           }
           try { clientRes.write(`data: ${data}\n\n`); } catch {}
@@ -339,10 +343,14 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
         const reasoning = extractOutputReasoning(allLines);
         const premature = isPrematureStop(allLines);
         const finalReason = extractStreamFinishReason(allLines) || finishReason || "unknown";
-        console.log(`[cf-stream-finish] reason:${finalReason} content:${output.length} reasoning:${reasoning.length} outTokens:${outputTokens} premature:${premature}`);
+        const finishMsg = `[cf-stream-finish] reason:${finalReason} content:${output.length} reasoning:${reasoning.length} outTokens:${outputTokens} premature:${premature}`;
+        console.log(finishMsg);
+        addLog({ level: "info", message: finishMsg, timestamp: Date.now() }).catch(() => {});
         if (premature && prematureStopAttempts < CF_STOP_CONTINUE_MAX) {
           prematureStopAttempts++;
-          console.log(`[cf-stop-continue] premature stop detected, attempt ${prematureStopAttempts}/${CF_STOP_CONTINUE_MAX}`);
+          const continueMsg = `[cf-stop-continue] premature stop detected, attempt ${prematureStopAttempts}/${CF_STOP_CONTINUE_MAX}`;
+          console.log(continueMsg);
+          addLog({ level: "info", message: continueMsg, timestamp: Date.now() }).catch(() => {});
           tryAutoContinue();
           return;
         }
@@ -370,10 +378,14 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
           const reasoning = extractOutputReasoning(allLines);
           const premature = isPrematureStop(allLines);
           const finalReason = extractStreamFinishReason(allLines) || finishReason || "unknown";
-          console.log(`[cf-stream-close] reason:${finalReason} content:${output.length} reasoning:${reasoning.length} outTokens:${outputTokens} premature:${premature}`);
+          const closeMsg = `[cf-stream-close] reason:${finalReason} content:${output.length} reasoning:${reasoning.length} outTokens:${outputTokens} premature:${premature}`;
+          console.log(closeMsg);
+          addLog({ level: "info", message: closeMsg, timestamp: Date.now() }).catch(() => {});
           if (premature && prematureStopAttempts < CF_STOP_CONTINUE_MAX) {
             prematureStopAttempts++;
-            console.log(`[cf-stop-continue] premature stop detected, attempt ${prematureStopAttempts}/${CF_STOP_CONTINUE_MAX}`);
+            const continueMsg = `[cf-stop-continue] premature stop detected, attempt ${prematureStopAttempts}/${CF_STOP_CONTINUE_MAX}`;
+            console.log(continueMsg);
+            addLog({ level: "info", message: continueMsg, timestamp: Date.now() }).catch(() => {});
             tryAutoContinue();
             return;
           }
@@ -626,7 +638,7 @@ module.exports = async function handler(req, res) {
             const content = extractMessageContent(finalBody);
             const reasoning = extractMessageReasoning(finalBody);
 
-            const shouldContinue = innerFinishReason === "length" || (!content && reasoning) || (innerFinishReason === "stop" && content.length < 100 && reasoning.length > content.length * 2);
+            const shouldContinue = innerFinishReason === "length" || (!content && reasoning) || (innerFinishReason === "stop" && content.length < 500 && reasoning.length > 0);
             if (!shouldContinue) {
               break;
             }
@@ -673,21 +685,6 @@ module.exports = async function handler(req, res) {
         }
       }
 
-      const elapsed = Date.now() - startTime;
-      if (finalBody) {
-        finishReason = extractFinishReason(finalBody) || finishReason;
-        const content = extractMessageContent(finalBody);
-        const reasoning = extractMessageReasoning(finalBody);
-        const premature = finishReason === "stop" && content.length < 100 && reasoning.length > content.length * 2;
-        console.log(`[cf-final] finish:${finishReason} content:${content.length} reasoning:${reasoning.length} continued:${autoContinueAttempts} premature:${premature}`);
-      }
-      res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
-      res.setHeader("X-Proxy-Key-Total", String(keys.length));
-      res.setHeader("X-Proxy-Attempts", String(result.attempts));
-      res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
-      res.setHeader("X-Proxy-Provider", result.provider || "kimchi");
-      res.setHeader("X-Proxy-Finish-Reason", String(finishReason));
-
       let inputTokens = 0;
       let outputTokens = 0;
       try {
@@ -697,6 +694,23 @@ module.exports = async function handler(req, res) {
           outputTokens = parsed.usage.completion_tokens || 0;
         }
       } catch {}
+
+      const elapsed = Date.now() - startTime;
+      if (finalBody) {
+        finishReason = extractFinishReason(finalBody) || finishReason;
+        const content = extractMessageContent(finalBody);
+        const reasoning = extractMessageReasoning(finalBody);
+        const premature = finishReason === "stop" && content.length < 500 && reasoning.length > 0;
+        const finalMsg = `[cf-final] finish:${finishReason} content:${content.length} reasoning:${reasoning.length} outTokens:${outputTokens} continued:${autoContinueAttempts} premature:${premature}`;
+        console.log(finalMsg);
+        await addLog({ level: "info", message: finalMsg, timestamp: Date.now() }).catch(() => {});
+      }
+      res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
+      res.setHeader("X-Proxy-Key-Total", String(keys.length));
+      res.setHeader("X-Proxy-Attempts", String(result.attempts));
+      res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
+      res.setHeader("X-Proxy-Provider", result.provider || "kimchi");
+      res.setHeader("X-Proxy-Finish-Reason", String(finishReason));
 
       await logRequest({
         model,
