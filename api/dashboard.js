@@ -144,14 +144,18 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .log-level.info{color:#22c55e}
   .log-level.error{color:#ff4545}
   .log-msg{color:#a0a0b0}
-  .key-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px}
+  .key-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-bottom:20px}
   .key-card{background:#16161f;border:1px solid #1e1e2e;border-radius:12px;padding:20px;text-align:center}
   .key-card .num{font-size:32px;font-weight:700;margin-bottom:4px}
   .key-card .lbl{color:#6b6b80;font-size:11px;text-transform:uppercase;letter-spacing:1px}
-  .key-card.green .num{color:#22c55e}
-  .key-card.red .num{color:#ff4545}
-  .key-card.yellow .num{color:#eab308}
-  .key-card.blue .num{color:#60a5fa}
+  .key-card.kimchi .num{color:#ff6b35}
+  .key-card.cf .num{color:#f48120}
+  .table-wrap{max-height:320px;overflow-y:auto;border-radius:14px;border:1px solid #1e1e2e;background:#111118}
+  .table-wrap table{border:none;border-radius:0}
+  .table-wrap::-webkit-scrollbar{width:8px}
+  .table-wrap::-webkit-scrollbar-track{background:#111118}
+  .table-wrap::-webkit-scrollbar-thumb{background:#2a2a3a;border-radius:4px}
+  .table-wrap::-webkit-scrollbar-thumb:hover{background:#3a3a4a}
   .err-table td.error-msg{max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:12px}
   @media(max-width:768px){.stats,.key-grid{grid-template-columns:repeat(2,1fr)}.container{padding:16px}}
 </style>
@@ -202,27 +206,29 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <div class="section">
     <h2><span class="icon">🔑</span> API Keys</h2>
     <div class="key-grid">
-      <div class="key-card blue"><div class="num" id="k-total">—</div><div class="lbl">Total Keys</div></div>
-      <div class="key-card green"><div class="num" id="k-active">—</div><div class="lbl">Active</div></div>
-      <div class="key-card red"><div class="num" id="k-exhausted">—</div><div class="lbl">Exhausted</div></div>
-      <div class="key-card yellow"><div class="num" id="k-errors">—</div><div class="lbl">Total Errors</div></div>
+      <div class="key-card kimchi"><div class="num" id="k-kimchi">—</div><div class="lbl">Kimchi Keys</div></div>
+      <div class="key-card cf"><div class="num" id="k-cf">—</div><div class="lbl">Cloudflare Credentials</div></div>
     </div>
   </div>
 
   <div class="section">
     <h2><span class="icon">🔴</span> Errors</h2>
-    <table class="err-table">
-      <thead><tr><th>#</th><th>Req</th><th>Provider</th><th>Model</th><th>Key</th><th>Status</th><th>Error</th><th>When</th></tr></thead>
-      <tbody id="err-body"><tr><td colspan="8" style="text-align:center;color:#4a4a5a">No errors yet</td></tr></tbody>
-    </table>
+    <div class="table-wrap">
+      <table class="err-table">
+        <thead><tr><th>#</th><th>Req</th><th>Provider</th><th>Model</th><th>Key</th><th>Status</th><th>Error</th><th>When</th></tr></thead>
+        <tbody id="err-body"><tr><td colspan="8" style="text-align:center;color:#4a4a5a">No errors yet</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="section">
     <h2><span class="icon">📋</span> Recent Requests</h2>
-    <table>
-      <thead><tr><th>#</th><th>Provider</th><th>Model</th><th>In / Out</th><th>Key</th><th>Status</th><th>Time</th><th>When</th></tr></thead>
-      <tbody id="req-body"><tr><td colspan="8" style="text-align:center;color:#4a4a5a">No requests yet</td></tr></tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>Provider</th><th>Model</th><th>In / Out</th><th>Key</th><th>Status</th><th>Finish</th><th>Time</th><th>When</th></tr></thead>
+        <tbody id="req-body"><tr><td colspan="9" style="text-align:center;color:#4a4a5a">No requests yet</td></tr></tbody>
+      </table>
+    </div>
   </div>
 
   <div class="section">
@@ -270,10 +276,10 @@ async function load(){
     document.getElementById('s-out').textContent=fmt(d.totalOutputTokens);
     document.getElementById('s-cost').textContent='~$'+d.estimatedCost.toFixed(2);
     if(d.keys){
-      document.getElementById('k-total').textContent=d.keys.total;
-      document.getElementById('k-active').textContent=d.keys.active;
-      document.getElementById('k-exhausted').textContent=d.keys.exhausted;
-      document.getElementById('k-errors').textContent=d.totalErrors;
+      document.getElementById('k-kimchi').textContent=d.keys.total;
+    }
+    if(d.cloudflare){
+      document.getElementById('k-cf').textContent=d.cloudflare.credentials;
     }
     const kimchi=d.providers?.kimchi||{requests:0,inputTokens:0,outputTokens:0,errors:0};
     const cf=d.providers?.cf||{requests:0,inputTokens:0,outputTokens:0,errors:0};
@@ -290,8 +296,8 @@ async function load(){
     if(!d.errors||d.errors.length===0){etbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4a4a5a">No errors</td></tr>'}
     else{etbody.innerHTML=d.errors.map(e=>'<tr><td>'+e.id+'</td><td>#'+e.request_id+'</td><td>'+providerBadge(e.provider)+'</td><td><code>'+esc(e.model)+'</code></td><td>#'+e.keyIndex+'</td><td><span class="badge err">'+e.status+'</span></td><td class="error-msg" title="'+esc(e.error)+'">'+esc(e.error)+'</td><td>'+ago(e.timestamp)+'</td></tr>').join('')}
     const tbody=document.getElementById('req-body');
-    if(d.recentRequests.length===0){tbody.innerHTML='<tr><td colspan="8" style="text-align:center;color:#4a4a5a">No requests yet</td></tr>';return}
-    tbody.innerHTML=d.recentRequests.map(r=>'<tr><td>'+r.id+'</td><td>'+providerBadge(r.provider)+'</td><td><code>'+esc(r.model)+'</code></td><td>'+fmt(r.inputTokens)+' / '+fmt(r.outputTokens)+'</td><td>#'+r.keyIndex+'</td><td><span class="badge '+(r.status<400?'ok':'err')+'">'+r.status+'</span></td><td>'+r.elapsed+'ms</td><td>'+ago(r.timestamp)+'</td></tr>').join('');
+    if(d.recentRequests.length===0){tbody.innerHTML='<tr><td colspan="9" style="text-align:center;color:#4a4a5a">No requests yet</td></tr>';return}
+    tbody.innerHTML=d.recentRequests.map(r=>'<tr><td>'+r.id+'</td><td>'+providerBadge(r.provider)+'</td><td><code>'+esc(r.model)+'</code></td><td>'+fmt(r.inputTokens)+' / '+fmt(r.outputTokens)+'</td><td>#'+r.keyIndex+'</td><td><span class="badge '+(r.status<400?'ok':'err')+'">'+r.status+'</span></td><td><code>'+esc(r.finishReason||'-')+'</code></td><td>'+r.elapsed+'ms</td><td>'+ago(r.timestamp)+'</td></tr>').join('');
     document.getElementById('log-count').textContent=d.logs.length+' entries';
     document.getElementById('log-body').innerHTML=d.logs.slice(0,100).map(l=>'<div class="log-entry"><span class="log-time">'+time(l.timestamp)+'</span><span class="log-level '+l.level+'">'+l.level.toUpperCase()+'</span><span class="log-msg">'+esc(l.message)+'</span></div>').join('');
   }catch(e){}
@@ -354,7 +360,7 @@ module.exports = async function handler(req, res) {
       const stats = await statsRes.json();
       return res.status(200).json(stats);
     } catch (e) {
-      return res.status(200).json({ totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCost: 0, totalErrors: 0, providers: {}, requests: [], errors: [], keys: { total: 55, active: 55, exhausted: 0, throttled: 0, errors: [] }, recentRequests: [] });
+      return res.status(200).json({ totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCost: 0, totalErrors: 0, providers: {}, requests: [], errors: [], keys: { total: 55, active: 55, exhausted: 0, throttled: 0, errors: [] }, cloudflare: { credentials: 0 }, recentRequests: [] });
     }
   }
 

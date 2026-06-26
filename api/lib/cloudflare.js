@@ -88,6 +88,12 @@ async function proxyToCloudflare(options) {
     signal,
   });
 
+  let finishReason = null;
+  try {
+    const parsed = JSON.parse(result.body);
+    finishReason = parsed.choices?.[0]?.finish_reason ?? null;
+  } catch {}
+
   return {
     status: result.status,
     headers: result.headers,
@@ -96,6 +102,7 @@ async function proxyToCloudflare(options) {
     cfIndex: credential.index,
     cfTotal: credential.total,
     attempts: 1,
+    finishReason,
   };
 }
 
@@ -133,6 +140,7 @@ async function proxyToCloudflareStreaming(options) {
     cfIndex: credential.index,
     cfTotal: credential.total,
     attempts: 1,
+    finishReason: null,
   };
 }
 

@@ -197,12 +197,18 @@ async function proxyToKimchi(options) {
       });
 
       if (!RETRYABLE_STATUSES.has(result.status)) {
+        let finishReason = null;
+        try {
+          const parsed = JSON.parse(result.body);
+          finishReason = parsed.choices?.[0]?.finish_reason ?? null;
+        } catch {}
         return {
           status: result.status,
           headers: result.headers,
           body: result.body,
           keyIndex: currentIndex,
           attempts: attempt,
+          finishReason,
         };
       }
 
@@ -275,6 +281,7 @@ async function proxyToKimchiStreaming(options) {
         stream: result.stream,
         keyIndex: keyInfo.index,
         attempts: attempt,
+        finishReason: null,
       };
     } catch (error) {
       lastError.push(error instanceof Error ? error : new Error(String(error)));

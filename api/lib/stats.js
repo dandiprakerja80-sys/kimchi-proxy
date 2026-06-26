@@ -213,6 +213,7 @@ async function logRequest(data) {
     keyIndex: data.keyIndex ?? 0,
     status: data.status || 200,
     elapsed: data.elapsed || 0,
+    finishReason: data.finishReason || null,
     error: data.error || null,
     timestamp: Date.now(),
   };
@@ -239,10 +240,11 @@ async function logRequest(data) {
     }
   }
 
+  const finishSegment = data.finishReason ? ` finish:${data.finishReason}` : "";
   s.logs.unshift({
     id: s.logs.length + 1,
     level: data.status >= 400 ? "error" : "info",
-    message: `${data.model} (${provider}) in:${data.inputTokens || 0} out:${data.outputTokens || 0} ${data.elapsed}ms key:${data.keyIndex} status:${data.status}${data.error ? " err:" + data.error : ""}`,
+    message: `${data.model} (${provider}) in:${data.inputTokens || 0} out:${data.outputTokens || 0} ${data.elapsed}ms key:${data.keyIndex}${finishSegment} status:${data.status}${data.error ? " err:" + data.error : ""}`,
     timestamp: Date.now(),
   });
   if (s.logs.length > MAX_LOGS) {
@@ -315,6 +317,9 @@ async function getStats(range) {
   const keysRaw = process.env.KIMCHI_API_KEYS || "";
   const totalKeys = keysRaw ? keysRaw.split(/[\s,]+/).filter(Boolean).length : 0;
 
+  const cfRaw = process.env.CLOUDFLARE_CREDENTIALS || "";
+  const cfCreds = cfRaw ? cfRaw.split(/[\n;]+/).map(l => l.trim()).filter(l => l.includes(",")).length : 0;
+
   return {
     range,
     totalRequests: totalReqs,
@@ -330,7 +335,10 @@ async function getStats(range) {
       throttled: s.keys.throttled.size,
       errors: keyErrors,
     },
-    recentRequests: filtered.slice(0, 100),
+    cloudflare: {
+      credentials: cfCreds,
+    },
+    recentRequests: filtered.slice(0, 50),
     errors: filteredErrors.slice(0, 50),
     logs: s.logs.slice(0, 150),
   };
