@@ -130,8 +130,6 @@ function shouldUseCloudflare(model) {
 function applyCfMaxTokens(body) {
   const cloned = { ...body };
   cloned.max_tokens = CF_MAX_TOKENS;
-  delete cloned.tools;
-  delete cloned.tool_choice;
   return cloned;
 }
 
@@ -242,7 +240,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
 
     function isPrematureStop(lines) {
       const reason = extractStreamFinishReason(lines);
-      if (reason === "tool_calls") return true;
+      if (reason === "tool_calls") return false; // valid tool call, not premature
       if (reason !== "stop") return false;
       const output = extractOutputText(lines);
       const reasoning = extractOutputReasoning(lines);
@@ -606,7 +604,7 @@ async function completeNonStreaming({ body, getNextKey, startTime, keyTotal }) {
         const content = extractMessageContent(finalBody);
         const reasoning = extractMessageReasoning(finalBody);
 
-        const shouldContinue = innerFinishReason === "length" || (!content && reasoning) || (innerFinishReason === "stop" && content.length < 500 && reasoning.length > 0) || innerFinishReason === "tool_calls";
+        const shouldContinue = innerFinishReason === "length" || (!content && reasoning) || (innerFinishReason === "stop" && content.length < 500 && reasoning.length > 0);
         if (!shouldContinue) {
           break;
         }
@@ -684,8 +682,10 @@ function streamJsonAsSse(res, parsed, model) {
     }
     const id = parsed.id || `id-${Date.now()}`;
     const created = parsed.created || Math.floor(Date.now() / 1000);
-    const reasoning = choice.message?.reasoning_content || "";
-    const content = choice.message?.content || "";
+    const message = choice.message || {};
+    const reasoning = message.reasoning_content || "";
+    const content = message.content || "";
+    const toolCalls = message.tool_calls || null;
     const finishReason = choice.finish_reason || "stop";
     const base = { id, object: "chat.completion.chunk", created, model };
 
@@ -706,6 +706,10 @@ function streamJsonAsSse(res, parsed, model) {
       const piece = content.slice(i, i + 20);
       sendChunk({ content: piece });
       index++;
+    }
+
+    if (toolCalls && toolCalls.length > 0) {
+      sendChunk({ tool_calls: toolCalls });
     }
 
     sendChunk({}, finishReason);
