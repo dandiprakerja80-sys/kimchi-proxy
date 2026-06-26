@@ -93,6 +93,39 @@ function extractFinishReason(parsed) {
   }
 }
 
+function extractRequestToolInfo(body) {
+  const tools = body?.tools;
+  const hasTools = Array.isArray(tools) && tools.length > 0;
+  const toolNames = hasTools
+    ? tools.map((t) => t?.function?.name || t?.name || "unknown").join(",")
+    : "";
+  const toolChoice = body?.tool_choice;
+  const hasToolChoice = toolChoice !== undefined && toolChoice !== null;
+  const toolChoiceType = typeof toolChoice === "string"
+    ? toolChoice
+    : toolChoice?.type || "none";
+  return {
+    hasTools,
+    toolCount: hasTools ? tools.length : 0,
+    toolNames,
+    hasToolChoice,
+    toolChoiceType,
+  };
+}
+
+function extractResponseToolInfo(parsed) {
+  const toolCalls = parsed?.choices?.[0]?.message?.tool_calls;
+  const hasToolCalls = Array.isArray(toolCalls) && toolCalls.length > 0;
+  const toolCallNames = hasToolCalls
+    ? toolCalls.map((tc) => tc?.function?.name || "unknown").join(",")
+    : "";
+  return {
+    hasToolCalls,
+    toolCallCount: hasToolCalls ? toolCalls.length : 0,
+    toolCallNames,
+  };
+}
+
 function mergeResponses(base, continuation) {
   try {
     const baseContent = extractMessageContent(base);
@@ -576,6 +609,11 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
 async function completeNonStreaming({ body, getNextKey, startTime, keyTotal }) {
   const maxRetries = Math.min(keyTotal || 55, 55);
   const cfBody = { ...body, stream: false };
+  const reqToolInfo = extractRequestToolInfo(body);
+  const useCf = shouldUseCloudflare(body.model);
+
+  console.log(`[provider-decision] model:${body.model} useCf:${useCf} cfEnabled:${isCfEnabled()} supported:${isSupportedModel(body.model)} hasTools:${reqToolInfo.hasTools} toolCount:${reqToolInfo.toolCount} toolChoice:${reqToolInfo.toolChoiceType}`);
+
   let result = await tryCloudflareThenKimchi({
     body: cfBody,
     getNextKey,
@@ -583,6 +621,8 @@ async function completeNonStreaming({ body, getNextKey, startTime, keyTotal }) {
     maxRetries,
     signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
   });
+
+  console.log(`[upstream-result] provider:${result.provider || "unknown"} status:${result.status} cfIndex:${result.cfIndex ?? "-"} finishReason:${result.finishReason || "-"}`);
 
   let finalBody = null;
   let finishReason = result.finishReason || "unknown";
@@ -599,12 +639,18 @@ async function completeNonStreaming({ body, getNextKey, startTime, keyTotal }) {
     }
 
     if (finalBody) {
+      const respToolInfo = extractResponseToolInfo(finalBody);
+      console.log(`[cf-first-response] finish:${finalBody.choices?.[0]?.finish_reason} hasToolCalls:${respToolInfo.hasToolCalls} toolCallCount:${respToolInfo.toolCallCount}`);
+
       for (let attempt = 1; attempt <= AUTO_CONTINUE_MAX; attempt++) {
         const innerFinishReason = finalBody.choices?.[0]?.finish_reason;
         const content = extractMessageContent(finalBody);
         const reasoning = extractMessageReasoning(finalBody);
 
         const shouldContinue = innerFinishReason === "length" || (!content && reasoning) || (innerFinishReason === "stop" && content.length < 500 && reasoning.length > 0);
+        const continueReason = innerFinishReason === "length" ? "length" : !content && reasoning ? "reasoning-only" : innerFinishReason === "stop" && content.length < 500 && reasoning.length > 0 ? "short-stop-with-reasoning" : "none";
+        console.log(`[auto-continue-check] attempt:${attempt} finish:${innerFinishReason} content:${content.length} reasoning:${reasoning.length} shouldContinue:${shouldContinue} reason:${continueReason}`);
+
         if (!shouldContinue) {
           break;
         }
@@ -626,6 +672,7 @@ async function completeNonStreaming({ body, getNextKey, startTime, keyTotal }) {
         });
 
         if (continueResult.status !== 200) {
+          console.log(`[auto-continue] upstream returned ${continueResult.status}, stopping`);
           break;
         }
 
@@ -633,19 +680,22 @@ async function completeNonStreaming({ body, getNextKey, startTime, keyTotal }) {
         try {
           continueBodyParsed = JSON.parse(continueResult.body);
         } catch {
+          console.log(`[auto-continue] failed to parse continuation body, stopping`);
           break;
         }
 
-            finalBody = mergeResponses(finalBody, continueBodyParsed);
+        finalBody = mergeResponses(finalBody, continueBodyParsed);
 
-            const nextFinishReason = finalBody.choices?.[0]?.finish_reason;
-            const nextContent = extractMessageContent(finalBody);
-            const nextReasoning = extractMessageReasoning(finalBody);
-            const shouldContinueNext = nextFinishReason === "length" || (!nextContent && nextReasoning) || (nextFinishReason === "stop" && nextContent.length < 500 && nextReasoning.length > 0) || nextFinishReason === "tool_calls";
-            if (!shouldContinueNext) {
-              break;
-            }
-          }
+        const nextFinishReason = finalBody.choices?.[0]?.finish_reason;
+        const nextContent = extractMessageContent(finalBody);
+        const nextReasoning = extractMessageReasoning(finalBody);
+        const shouldContinueNext = nextFinishReason === "length" || (!nextContent && nextReasoning) || (nextFinishReason === "stop" && nextContent.length < 500 && nextReasoning.length > 0);
+        const nextContinueReason = nextFinishReason === "length" ? "length" : !nextContent && nextReasoning ? "reasoning-only" : nextFinishReason === "stop" && nextContent.length < 500 && nextReasoning.length > 0 ? "short-stop-with-reasoning" : "none";
+        console.log(`[auto-continue-check-next] finish:${nextFinishReason} content:${nextContent.length} reasoning:${nextReasoning.length} shouldContinue:${shouldContinueNext} reason:${nextContinueReason}`);
+        if (!shouldContinueNext) {
+          break;
+        }
+      }
 
       result.body = JSON.stringify(finalBody);
     }
@@ -664,7 +714,8 @@ async function completeNonStreaming({ body, getNextKey, startTime, keyTotal }) {
     const content = extractMessageContent(finalBody);
     const reasoning = extractMessageReasoning(finalBody);
     const premature = finishReason === "stop" && content.length < 500 && reasoning.length > 0;
-    const finalMsg = `[cf-final] finish:${finishReason} content:${content.length} reasoning:${reasoning.length} outTokens:${outputTokens} continued:${autoContinueAttempts} premature:${premature}`;
+    const finalRespToolInfo = extractResponseToolInfo(finalBody);
+    const finalMsg = `[cf-final] finish:${finishReason} content:${content.length} reasoning:${reasoning.length} outTokens:${outputTokens} continued:${autoContinueAttempts} premature:${premature} hasTools:${reqToolInfo.hasTools} toolCount:${reqToolInfo.toolCount} toolChoice:${reqToolInfo.toolChoiceType} hasToolCalls:${finalRespToolInfo.hasToolCalls} toolCallCount:${finalRespToolInfo.toolCallCount} toolCallNames:[${finalRespToolInfo.toolCallNames}]`;
     console.log(finalMsg);
     await addLog({ level: "info", message: finalMsg, timestamp: Date.now() }).catch(() => {});
   }
@@ -785,6 +836,8 @@ module.exports = async function handler(req, res) {
     model = body.model || "unknown";
     startTime = Date.now();
     const isStreaming = body.stream === true;
+    const reqToolInfo = extractRequestToolInfo(body);
+    console.log(`[incoming-request] model:${model} stream:${isStreaming} useCf:${shouldUseCloudflare(model)} hasTools:${reqToolInfo.hasTools} toolCount:${reqToolInfo.toolCount} toolNames:[${reqToolInfo.toolNames}] toolChoice:${reqToolInfo.toolChoiceType}`);
 
     if (isStreaming) {
       if (shouldUseCloudflare(body.model)) {
