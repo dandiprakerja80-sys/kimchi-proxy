@@ -102,6 +102,7 @@ function logRequest(data) {
   const entry = {
     id: s.totalRequests,
     model: data.model || "unknown",
+    provider: data.provider || "kimchi",
     inputTokens: data.inputTokens || 0,
     outputTokens: data.outputTokens || 0,
     keyIndex: data.keyIndex ?? 0,
@@ -135,7 +136,7 @@ function logRequest(data) {
   s.logs.unshift({
     id: s.logs.length + 1,
     level: data.status >= 400 ? "error" : "info",
-    message: `${data.model} in:${data.inputTokens || 0} out:${data.outputTokens || 0} ${data.elapsed}ms key:${data.keyIndex} status:${data.status}${data.error ? " err:" + data.error : ""}`,
+    message: `${data.model} (${data.provider || "kimchi"}) in:${data.inputTokens || 0} out:${data.outputTokens || 0} ${data.elapsed}ms key:${data.keyIndex} status:${data.status}${data.error ? " err:" + data.error : ""}`,
     timestamp: Date.now(),
   });
   if (s.logs.length > MAX_LOGS) {
@@ -180,12 +181,22 @@ function getStats(range) {
   let totalOut = 0;
   let totalReqs = 0;
   let totalErrs = 0;
+  const providerStats = {};
 
   for (const r of filtered) {
     totalReqs++;
     totalIn += r.inputTokens || 0;
     totalOut += r.outputTokens || 0;
     if (r.status >= 400) totalErrs++;
+
+    const provider = r.provider || "kimchi";
+    if (!providerStats[provider]) {
+      providerStats[provider] = { requests: 0, inputTokens: 0, outputTokens: 0, errors: 0 };
+    }
+    providerStats[provider].requests++;
+    providerStats[provider].inputTokens += r.inputTokens || 0;
+    providerStats[provider].outputTokens += r.outputTokens || 0;
+    if (r.status >= 400) providerStats[provider].errors++;
   }
 
   const cost = (totalIn / 1000) * EST_COST_PER_1K_INPUT + (totalOut / 1000) * EST_COST_PER_1K_OUTPUT;
@@ -205,6 +216,7 @@ function getStats(range) {
     totalOutputTokens: totalOut,
     totalErrors: totalErrs,
     estimatedCost: cost,
+    providers: providerStats,
     keys: {
       total: totalKeys,
       active: totalKeys - s.keys.exhausted.size,

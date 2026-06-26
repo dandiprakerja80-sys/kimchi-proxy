@@ -401,4 +401,4 @@ function streamResponse(clientRes, result, options = {}) {
   });
 }
 
-module.exports = { proxyToKimchi, proxyToKimchiStreaming, writeResponse, streamResponse, KIMCHI_CLI_HEADERS };
+module.exports = { proxyToKimchi, proxyToKimchiStreaming, requestUpstream, requestUpstreamStreaming, writeResponse, streamResponse, KIMCHI_CLI_HEADERS, FETCH_TIMEOUT_MS };

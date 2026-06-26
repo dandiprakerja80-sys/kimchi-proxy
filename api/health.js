@@ -1,5 +1,6 @@
 const { parseKeys, selectKey, throttleKey, getKeyStatus } = require("./lib/key-rotation.js");
 const { validateProxyApiKey } = require("./lib/auth.js");
+const { isCfEnabled, parseCfCredentials } = require("./lib/cloudflare.js");
 
 module.exports = async function handler(req, res) {
   if (!validateProxyApiKey(req, res)) {
@@ -9,6 +10,7 @@ module.exports = async function handler(req, res) {
   try {
     const keysRaw = process.env.KIMCHI_API_KEYS;
     const keys = parseKeys(keysRaw);
+    const cfCredentials = parseCfCredentials();
 
     const status = {
       ok: true,
@@ -16,6 +18,11 @@ module.exports = async function handler(req, res) {
       version: "1.0.0",
       keysConfigured: keys.length,
       keyStatus: getKeyStatus({ keys }),
+      cloudflare: {
+        enabled: isCfEnabled(),
+        credentialsConfigured: cfCredentials.length,
+        models: ["kimi-k2.7", "kimi-k2.6"],
+      },
     };
 
     if (keys.length === 0) {

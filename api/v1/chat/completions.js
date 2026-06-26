@@ -1,11 +1,9 @@
-const https = require("https");
-const http = require("http");
 const { URL } = require("url");
 const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
 const { proxyToKimchi, proxyToKimchiStreaming, writeResponse } = require("../../lib/proxy.js");
 const { logRequest, getStats } = require("../../lib/stats.js");
-const { KIMCHI_CLI_HEADERS } = require("../../lib/proxy.js");
 const { validateProxyApiKey } = require("../../lib/auth.js");
+const { isCfEnabled, isSupportedModel, proxyToCloudflare, proxyToCloudflareStreaming } = require("../../lib/cloudflare.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 const AUTO_CONTINUE_MAX = 5;
@@ -13,26 +11,6 @@ const AUTO_CONTINUE_TIMEOUT_MS = 120000;
 const DEFAULT_MAX_TOKENS = 16384;
 
 const SKIP_HEADERS = new Set(["transfer-encoding", "connection", "content-length"]);
-
-function requestUpstreamRaw(options) {
-  return new Promise((resolve, reject) => {
-    const { url, method, headers, body, signal } = options;
-    const parsed = new URL(url);
-    const lib = parsed.protocol === "https:" ? https : http;
-    const reqHeaders = { ...headers, "Content-Length": Buffer.byteLength(body || "") };
-    const req = lib.request(
-      { hostname: parsed.hostname, port: parsed.port || 443, path: parsed.pathname + parsed.search, method, headers: reqHeaders },
-      (res) => { resolve({ status: res.statusCode, headers: res.headers, stream: res }); },
-    );
-    req.on("error", reject);
-    if (signal) {
-      if (signal.aborted) { req.destroy(); reject(new Error("aborted")); return; }
-      signal.addEventListener("abort", () => { req.destroy(); reject(new Error("aborted")); }, { once: true });
-    }
-    if (body) req.write(body);
-    req.end();
-  });
-}
 
 function extractOutputText(sseEvents) {
   let text = "";
@@ -117,6 +95,63 @@ function mergeResponses(base, continuation) {
     console.error("[mergeResponses] error:", err.message);
   }
   return base;
+}
+
+function shouldUseCloudflare(model) {
+  return isCfEnabled() && isSupportedModel(model);
+}
+
+async function tryCloudflareThenKimchi({ body, getNextKey, requestHeaders, signal, maxRetries }) {
+  if (shouldUseCloudflare(body.model)) {
+    try {
+      const result = await proxyToCloudflare({
+        requestBody: body,
+        requestHeaders,
+        signal,
+      });
+      if (result.status >= 200 && result.status < 300) {
+        return { ...result, provider: "cf" };
+      }
+      console.log(`[cf] non-success status ${result.status}, falling back to kimchi`);
+    } catch (err) {
+      console.log(`[cf] error, falling back to kimchi:`, err.message);
+    }
+  }
+  const result = await proxyToKimchi({
+    upstreamUrl: KIMCHI_UPSTREAM,
+    getNextKey,
+    requestBody: body,
+    requestHeaders,
+    maxRetries,
+    signal,
+  });
+  return { ...result, provider: "kimchi" };
+}
+
+async function tryCloudflareThenKimchiStreaming({ body, getNextKey, requestHeaders, signal }) {
+  if (shouldUseCloudflare(body.model)) {
+    try {
+      const result = await proxyToCloudflareStreaming({
+        requestBody: body,
+        requestHeaders,
+        signal,
+      });
+      if (result.status >= 200 && result.status < 300) {
+        return { ...result, provider: "cf" };
+      }
+      console.log(`[cf] non-success status ${result.status}, falling back to kimchi`);
+    } catch (err) {
+      console.log(`[cf] error, falling back to kimchi:`, err.message);
+    }
+  }
+  const result = await proxyToKimchiStreaming({
+    upstreamUrl: KIMCHI_UPSTREAM,
+    getNextKey,
+    requestBody: body,
+    requestHeaders,
+    signal,
+  });
+  return { ...result, provider: "kimchi" };
 }
 
 function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey, startTime) {
@@ -233,15 +268,10 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
   const continueBody = buildContinueBody(body, partialOutput);
 
   try {
-    const result = await requestUpstreamRaw({
-      url: KIMCHI_UPSTREAM,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${getNextKey().key}`,
-        ...KIMCHI_CLI_HEADERS,
-      },
-      body: JSON.stringify(continueBody),
+    const result = await tryCloudflareThenKimchiStreaming({
+      body: continueBody,
+      getNextKey,
+      requestHeaders: { "X-Request-Start": String(Date.now()) },
       signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
     });
 
@@ -374,10 +404,9 @@ module.exports = async function handler(req, res) {
     const isStreaming = body.stream === true;
 
     if (isStreaming) {
-      const result = await proxyToKimchiStreaming({
-        upstreamUrl: KIMCHI_UPSTREAM,
+      const result = await tryCloudflareThenKimchiStreaming({
+        body,
         getNextKey,
-        requestBody: body,
         requestHeaders: { "X-Request-Start": String(Date.now()) },
         signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
       });
@@ -385,12 +414,14 @@ module.exports = async function handler(req, res) {
       res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
       res.setHeader("X-Proxy-Key-Total", String(keys.length));
       res.setHeader("X-Proxy-Attempts", String(result.attempts));
+      res.setHeader("X-Proxy-Provider", result.provider || "kimchi");
 
       logRequest({
         model,
         status: result.status,
         elapsed: Date.now() - startTime,
         keyIndex: lastKeyIndex,
+        provider: result.provider || "kimchi",
         inputTokens: body.messages ? body.messages.reduce((s, m) => s + (m.content || "").length / 4, 0) : 0,
         outputTokens: 0,
         method: "POST",
@@ -398,10 +429,9 @@ module.exports = async function handler(req, res) {
 
       await streamWithAutoContinue(res, result, body, keys, getNextKey, startTime);
     } else {
-      let result = await proxyToKimchi({
-        upstreamUrl: KIMCHI_UPSTREAM,
+      let result = await tryCloudflareThenKimchi({
+        body,
         getNextKey,
-        requestBody: body,
         requestHeaders: { "X-Request-Start": String(Date.now()) },
         maxRetries: Math.min(keys.length, 55),
         signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
@@ -437,10 +467,9 @@ module.exports = async function handler(req, res) {
             autoContinueAttempts++;
             console.log(`[auto-continue] non-streaming attempt ${attempt}, content: ${content.length} chars, reasoning: ${reasoning.length} chars`);
 
-            const continueResult = await proxyToKimchi({
-              upstreamUrl: KIMCHI_UPSTREAM,
+            const continueResult = await tryCloudflareThenKimchi({
+              body: buildContinueBody(body, content),
               getNextKey,
-              requestBody: buildContinueBody(body, content),
               requestHeaders: { "X-Request-Start": String(Date.now()) },
               maxRetries: Math.min(keys.length, 55),
               signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
@@ -477,6 +506,7 @@ module.exports = async function handler(req, res) {
       res.setHeader("X-Proxy-Key-Total", String(keys.length));
       res.setHeader("X-Proxy-Attempts", String(result.attempts));
       res.setHeader("X-Proxy-Elapsed-Ms", String(elapsed));
+      res.setHeader("X-Proxy-Provider", result.provider || "kimchi");
 
       let inputTokens = 0;
       let outputTokens = 0;
@@ -493,6 +523,7 @@ module.exports = async function handler(req, res) {
         status: result.status,
         elapsed,
         keyIndex: lastKeyIndex,
+        provider: result.provider || "kimchi",
         inputTokens,
         outputTokens,
         method: "POST",
