@@ -45,7 +45,10 @@ async function testCredential(credential) {
     body: JSON.stringify(body),
   });
 
-  return { verifyResult, chatResult };
+  const cloudflareComResult = await testUrl("https://cloudflare.com/");
+  const gatewayResult = await testUrl("https://gateway.ai.cloudflare.com/");
+
+  return { verifyResult, chatResult, cloudflareComResult, gatewayResult };
 }
 
 module.exports = async function handler(req, res) {
