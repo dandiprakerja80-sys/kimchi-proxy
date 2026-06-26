@@ -242,7 +242,10 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
       if (reason !== "stop") return false;
       const output = extractOutputText(lines);
       const reasoning = extractOutputReasoning(lines);
-      return !output && reasoning.length > 0;
+      // Premature if no content but reasoning exists, or content very short compared to reasoning
+      if (!output && reasoning.length > 0) return true;
+      if (output.length < 100 && reasoning.length > output.length * 2) return true;
+      return false;
     }
 
     function finish(finalReason) {
@@ -276,6 +279,8 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
             const fr = choice?.finish_reason;
             if (fr) {
               console.log(`[cf-chunk] finish:${fr} content:${content.length} reasoning:${reasoning.length} totalOut:${outputTokens}`);
+            } else if (content.length > 0 || reasoning.length > 0) {
+              console.log(`[cf-chunk] content:${content.length} reasoning:${reasoning.length} totalOut:${outputTokens}`);
             }
           }
           try { clientRes.write(`data: ${data}\n\n`); } catch {}
@@ -330,7 +335,12 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
       if (handleStreamEnd()) return;
 
       if (isStreamComplete(allLines)) {
-        if (isPrematureStop(allLines) && prematureStopAttempts < CF_STOP_CONTINUE_MAX) {
+        const output = extractOutputText(allLines);
+        const reasoning = extractOutputReasoning(allLines);
+        const premature = isPrematureStop(allLines);
+        const finalReason = extractStreamFinishReason(allLines) || finishReason || "unknown";
+        console.log(`[cf-stream-finish] reason:${finalReason} content:${output.length} reasoning:${reasoning.length} outTokens:${outputTokens} premature:${premature}`);
+        if (premature && prematureStopAttempts < CF_STOP_CONTINUE_MAX) {
           prematureStopAttempts++;
           console.log(`[cf-stop-continue] premature stop detected, attempt ${prematureStopAttempts}/${CF_STOP_CONTINUE_MAX}`);
           tryAutoContinue();
@@ -356,7 +366,12 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
       if (!done) {
         clearInterval(keepalive);
         if (isStreamComplete(allLines)) {
-          if (isPrematureStop(allLines) && prematureStopAttempts < CF_STOP_CONTINUE_MAX) {
+          const output = extractOutputText(allLines);
+          const reasoning = extractOutputReasoning(allLines);
+          const premature = isPrematureStop(allLines);
+          const finalReason = extractStreamFinishReason(allLines) || finishReason || "unknown";
+          console.log(`[cf-stream-close] reason:${finalReason} content:${output.length} reasoning:${reasoning.length} outTokens:${outputTokens} premature:${premature}`);
+          if (premature && prematureStopAttempts < CF_STOP_CONTINUE_MAX) {
             prematureStopAttempts++;
             console.log(`[cf-stop-continue] premature stop detected, attempt ${prematureStopAttempts}/${CF_STOP_CONTINUE_MAX}`);
             tryAutoContinue();
@@ -443,10 +458,17 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
             if (data === "[DONE]") { finish(); return; }
             try {
               const parsed = JSON.parse(data);
-              const delta = parsed.choices?.[0]?.delta || {};
+              const choice = parsed.choices?.[0];
+              const delta = choice?.delta || {};
               const content = delta.content || "";
               const reasoning = delta.reasoning_content || "";
               outputTokens += Math.ceil((content.length + reasoning.length) / 4);
+              const fr = choice?.finish_reason;
+              if (fr) {
+                console.log(`[cf-chunk-ac] finish:${fr} content:${content.length} reasoning:${reasoning.length} totalOut:${outputTokens}`);
+              } else if (content.length > 0 || reasoning.length > 0) {
+                console.log(`[cf-chunk-ac] content:${content.length} reasoning:${reasoning.length} totalOut:${outputTokens}`);
+              }
             } catch {}
             try { clientRes.write(`data: ${data}\n\n`); } catch {}
           }
@@ -588,6 +610,8 @@ module.exports = async function handler(req, res) {
 
       let finalBody = null;
       let finishReason = result.finishReason || "unknown";
+      let autoContinueAttempts = 0;
+      let continued = false;
 
       if (result.status === 200) {
         try {
@@ -597,15 +621,12 @@ module.exports = async function handler(req, res) {
         }
 
         if (finalBody) {
-          let continued = false;
-          let autoContinueAttempts = 0;
-
           for (let attempt = 1; attempt <= AUTO_CONTINUE_MAX; attempt++) {
-            const finishReason = finalBody.choices?.[0]?.finish_reason;
+            const innerFinishReason = finalBody.choices?.[0]?.finish_reason;
             const content = extractMessageContent(finalBody);
             const reasoning = extractMessageReasoning(finalBody);
 
-            const shouldContinue = finishReason === "length" || (!content && reasoning);
+            const shouldContinue = innerFinishReason === "length" || (!content && reasoning) || (innerFinishReason === "stop" && content.length < 100 && reasoning.length > content.length * 2);
             if (!shouldContinue) {
               break;
             }
@@ -655,6 +676,10 @@ module.exports = async function handler(req, res) {
       const elapsed = Date.now() - startTime;
       if (finalBody) {
         finishReason = extractFinishReason(finalBody) || finishReason;
+        const content = extractMessageContent(finalBody);
+        const reasoning = extractMessageReasoning(finalBody);
+        const premature = finishReason === "stop" && content.length < 100 && reasoning.length > content.length * 2;
+        console.log(`[cf-final] finish:${finishReason} content:${content.length} reasoning:${reasoning.length} continued:${autoContinueAttempts} premature:${premature}`);
       }
       res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
       res.setHeader("X-Proxy-Key-Total", String(keys.length));
