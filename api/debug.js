@@ -8,52 +8,31 @@ function mask(s) {
   return s.slice(0, 6) + "..." + s.slice(-4);
 }
 
-function testCredential(credential) {
-  return new Promise((resolve) => {
-    const model = mapModelToCf("kimi-k2.7");
-    const url = `https://api.cloudflare.com/client/v4/accounts/${credential.accountId}/ai/v1/chat/completions`;
-    const parsed = new URL(url);
-    const body = JSON.stringify({
-      model,
-      messages: [{ role: "user", content: "hi" }],
-      max_tokens: 5,
-      stream: false,
+async function testCredential(credential) {
+  const model = mapModelToCf("kimi-k2.7");
+  const url = `https://api.cloudflare.com/client/v4/accounts/${credential.accountId}/ai/v1/chat/completions`;
+  const body = {
+    model,
+    messages: [{ role: "user", content: "hi" }],
+    max_tokens: 5,
+    stream: false,
+  };
+
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${credential.token}`,
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
     });
-
-    const req = https.request(
-      {
-        hostname: parsed.hostname,
-        port: 443,
-        path: parsed.pathname,
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${credential.token}`,
-          "Content-Length": Buffer.byteLength(body),
-        },
-        timeout: 30000,
-      },
-      (response) => {
-        const chunks = [];
-        response.on("data", (chunk) => chunks.push(chunk));
-        response.on("end", () => {
-          const respBody = Buffer.concat(chunks).toString("utf-8");
-          let parsedBody;
-          try {
-            parsedBody = JSON.parse(respBody);
-          } catch {
-            parsedBody = respBody;
-          }
-          resolve({ status: response.statusCode, bodyPrefix: typeof parsedBody === "string" ? parsedBody.slice(0, 200) : JSON.stringify(parsedBody).slice(0, 200) });
-        });
-      },
-    );
-
-    req.on("error", (err) => resolve({ status: 0, error: err.message }));
-    req.on("timeout", () => resolve({ status: 0, error: "timeout" }));
-    req.write(body);
-    req.end();
-  });
+    const text = await res.text();
+    return { status: res.status, bodyPrefix: text.slice(0, 200) };
+  } catch (err) {
+    return { status: 0, error: err.message };
+  }
 }
 
 module.exports = async function handler(req, res) {
