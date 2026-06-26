@@ -1,5 +1,7 @@
 
 
+const { getSettings, setSettings } = require("./lib/settings.js");
+
 function getSessionSecret() {
   return process.env.DASHBOARD_PASSWORD || "kimchi-proxy";
 }
@@ -93,6 +95,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .topbar .dot{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   .topbar-right{display:flex;align-items:center;gap:20px}
+  .cf-toggle{display:flex;align-items:center;gap:10px;background:#111118;border:1px solid #1e1e2e;border-radius:10px;padding:8px 14px}
+  .cf-toggle span{font-size:12px;font-weight:600;color:#9090a8;text-transform:uppercase;letter-spacing:.5px}
+  .cf-toggle button{padding:6px 14px;border-radius:8px;border:none;font-size:12px;font-weight:700;cursor:pointer;transition:all .2s;min-width:70px}
+  .cf-toggle button.on{background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff}
+  .cf-toggle button.off{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff}
+  .cf-toggle button:hover{opacity:.85}
   .topbar-date{color:#9090a8;font-size:13px;font-weight:500;text-align:right;line-height:1.4}
   .topbar-date .day{color:#f0f0f5;font-weight:700;font-size:14px}
   .topbar a.signout{color:#6b6b80;text-decoration:none;font-size:13px;transition:color .2s}
@@ -164,6 +172,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="topbar">
   <h1><span class="dot"></span> Kimchi Proxy</h1>
   <div class="topbar-right">
+    <div class="cf-toggle">
+      <span>CF</span>
+      <button id="cf-toggle-btn" class="on">ON</button>
+    </div>
     <div class="topbar-date" id="clock"></div>
     <a class="signout" href="/api/dashboard?action=logout">Sign Out</a>
   </div>
@@ -302,6 +314,37 @@ async function load(){
     document.getElementById('log-body').innerHTML=d.logs.slice(0,100).map(l=>'<div class="log-entry"><span class="log-time">'+time(l.timestamp)+'</span><span class="log-level '+l.level+'">'+l.level.toUpperCase()+'</span><span class="log-msg">'+esc(l.message)+'</span></div>').join('');
   }catch(e){}
 }
+async function loadSettings(){
+  try{
+    const r=await fetch('/api/settings');
+    if(!r.ok)return;
+    const s=await r.json();
+    const btn=document.getElementById('cf-toggle-btn');
+    if(!btn)return;
+    const enabled=s.cf_enabled!==false;
+    btn.className=enabled?'on':'off';
+    btn.textContent=enabled?'ON':'OFF';
+  }catch(e){}
+}
+async function toggleCf(){
+  try{
+    const btn=document.getElementById('cf-toggle-btn');
+    if(!btn)return;
+    const currentOn=btn.classList.contains('on');
+    btn.disabled=true;
+    const r=await fetch('/api/settings',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({cf_enabled:!currentOn})
+    });
+    btn.disabled=false;
+    if(!r.ok)return;
+    await loadSettings();
+    load();
+  }catch(e){}
+}
+document.getElementById('cf-toggle-btn').addEventListener('click',toggleCf);
+loadSettings();
 load();
 setInterval(load,5000);
 </script>
@@ -361,6 +404,40 @@ module.exports = async function handler(req, res) {
       return res.status(200).json(stats);
     } catch (e) {
       return res.status(200).json({ totalRequests: 0, totalInputTokens: 0, totalOutputTokens: 0, estimatedCost: 0, totalErrors: 0, providers: {}, requests: [], errors: [], keys: { total: 55, active: 55, exhausted: 0, throttled: 0, errors: [] }, cloudflare: { credentials: 0 }, recentRequests: [] });
+    }
+  }
+
+  if (req.method === "GET" && req.url === "/api/settings") {
+    if (!checkAuth(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    try {
+      const settings = await getSettings();
+      return res.status(200).json(settings);
+    } catch (e) {
+      return res.status(500).json({ error: "Failed to load settings" });
+    }
+  }
+
+  if (req.method === "POST" && req.url === "/api/settings") {
+    if (!checkAuth(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    let data = req.body;
+    if (!data || typeof data !== "object") {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = {};
+      }
+    }
+    try {
+      const settings = await setSettings(data);
+      return res.status(200).json(settings);
+    } catch (e) {
+      return res.status(500).json({ error: "Failed to save settings" });
     }
   }
 

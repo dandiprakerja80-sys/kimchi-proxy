@@ -10,12 +10,12 @@ const STREAM_TIMEOUT_MS = 120000;
 
 const SKIP_HEADERS = new Set(["transfer-encoding", "connection", "content-length"]);
 
-function shouldUseCloudflare(model) {
-  return isCfEnabled() && isSupportedModel(model);
+async function shouldUseCloudflare(model) {
+  return (await isCfEnabled()) && isSupportedModel(model);
 }
 
 async function tryCloudflareThenKimchi({ body, getNextKey, requestHeaders, signal, maxRetries }) {
-  if (shouldUseCloudflare(body.model)) {
+  if (await shouldUseCloudflare(body.model)) {
     try {
       const result = await proxyToCloudflare({
         requestBody: body,
@@ -42,7 +42,7 @@ async function tryCloudflareThenKimchi({ body, getNextKey, requestHeaders, signa
 }
 
 async function tryCloudflareThenKimchiStreaming({ body, getNextKey, requestHeaders, signal }) {
-  if (shouldUseCloudflare(body.model)) {
+  if (await shouldUseCloudflare(body.model)) {
     try {
       const result = await proxyToCloudflareStreaming({
         requestBody: body,

@@ -29,11 +29,18 @@ function parseCfCredentials() {
     .filter(Boolean);
 }
 
-function isCfEnabled() {
+async function isCfEnabled() {
   const enabled = process.env.CLOUDFLARE_ENABLED;
   if (enabled === "false" || enabled === "0") return false;
-  // Default enabled if credentials are configured
-  return parseCfCredentials().length > 0;
+  if (parseCfCredentials().length === 0) return false;
+  try {
+    const { getSettings } = require("./settings.js");
+    const settings = await getSettings();
+    return settings.cf_enabled !== false;
+  } catch (e) {
+    console.error("[cloudflare] failed to read settings:", e.message);
+    return true;
+  }
 }
 
 function selectCfCredential() {
