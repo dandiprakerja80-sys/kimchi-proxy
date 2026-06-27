@@ -12,5 +12,8 @@
   },
   "engines": {
     "node": "22"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.5.0"
   }
 }

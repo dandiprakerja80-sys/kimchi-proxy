@@ -4,14 +4,9 @@
  */
 
 const { requestUpstream, requestUpstreamStreaming, FETCH_TIMEOUT_MS } = require("./proxy.js");
+const { getCfState, setCfState } = require("./stats.js");
 
 const CF_UPSTREAM_BASE = "https://api.cloudflare.com/client/v4/accounts";
-
-// In-memory rotation index for CF credentials
-let cfCredentialIndex = 0;
-
-// Map: credential index -> timestamp (ms) until which it is blacklisted
-const exhaustedUntil = new Map();
 
 function parseCfCredentials() {
   const raw = process.env.CLOUDFLARE_CREDENTIALS;
@@ -37,24 +32,43 @@ function getNextUtcMidnight() {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).getTime();
 }
 
-function isCredentialExhausted(index) {
-  const until = exhaustedUntil.get(index);
-  if (!until) return false;
-  if (Date.now() >= until) {
-    exhaustedUntil.delete(index);
+async function getCfStateSafe() {
+  try {
+    return await getCfState();
+  } catch (e) {
+    console.error("[cf] failed to load state:", e.message);
+    return { nextIndex: 0, exhausted: [] };
+  }
+}
+
+async function isCredentialExhausted(index) {
+  const state = await getCfStateSafe();
+  const entry = state.exhausted.find((e) => e.index === index);
+  if (!entry) return false;
+  if (Date.now() >= entry.until) {
+    state.exhausted = state.exhausted.filter((e) => e.index !== index);
+    await setCfState(state);
     return false;
   }
   return true;
 }
 
-function markCredentialExhausted(index) {
-  exhaustedUntil.set(index, getNextUtcMidnight());
+async function markCredentialExhausted(index) {
+  const state = await getCfStateSafe();
+  if (!state.exhausted.some((e) => e.index === index)) {
+    state.exhausted.push({ index, until: getNextUtcMidnight() });
+  }
+  try {
+    await setCfState(state);
+  } catch (e) {
+    console.error("[cf] failed to save exhausted state:", e.message);
+  }
 }
 
-function hasUsableCredential() {
+async function hasUsableCredential() {
   const credentials = parseCfCredentials();
   for (let i = 0; i < credentials.length; i++) {
-    if (!isCredentialExhausted(i)) return true;
+    if (!(await isCredentialExhausted(i))) return true;
   }
   return false;
 }
@@ -62,25 +76,57 @@ function hasUsableCredential() {
 function isCfEnabled() {
   const enabled = process.env.CLOUDFLARE_ENABLED;
   if (enabled === "false" || enabled === "0") return false;
-  return parseCfCredentials().length > 0 && hasUsableCredential();
+  return parseCfCredentials().length > 0;
 }
 
-function selectCfCredential() {
+async function getCfStatus() {
+  const credentials = parseCfCredentials();
+  const state = await getCfStateSafe();
+  const now = Date.now();
+  const exhausted = state.exhausted.filter((e) => now < e.until);
+  const activeCount = credentials.length - exhausted.length;
+  return {
+    enabled: isCfEnabled() && activeCount > 0,
+    total: credentials.length,
+    active: Math.max(0, activeCount),
+    exhausted: exhausted.length,
+    exhaustedCredentials: exhausted,
+    nextReset: exhausted.length > 0 ? Math.min(...exhausted.map((e) => e.until)) : null,
+  };
+}
+
+async function selectCfCredential() {
   const credentials = parseCfCredentials();
   if (credentials.length === 0) {
     throw new Error("No Cloudflare credentials configured");
   }
 
-  const startIdx = cfCredentialIndex % credentials.length;
+  const state = await getCfStateSafe();
+  const now = Date.now();
+  state.exhausted = state.exhausted.filter((e) => now < e.until);
+
+  let startIdx = state.nextIndex % credentials.length;
+  let selectedIdx = -1;
   for (let i = 0; i < credentials.length; i++) {
     const idx = (startIdx + i) % credentials.length;
-    if (!isCredentialExhausted(idx)) {
-      cfCredentialIndex = idx + 1;
-      return { ...credentials[idx], index: idx, total: credentials.length };
+    if (!state.exhausted.some((e) => e.index === idx)) {
+      selectedIdx = idx;
+      break;
     }
   }
 
-  throw new Error("All Cloudflare credentials exhausted");
+  if (selectedIdx === -1) {
+    throw new Error("All Cloudflare credentials exhausted");
+  }
+
+  state.nextIndex = (selectedIdx + 1) % credentials.length;
+  try {
+    await setCfState(state);
+  } catch (e) {
+    console.error("[cf] failed to save rotation state:", e.message);
+  }
+
+  return { ...credentials[selectedIdx], index: selectedIdx, total: credentials.length };
 }
 
 function mapModelToCf(model) {
@@ -134,7 +180,7 @@ async function proxyToCloudflare(options) {
   while (true) {
     let credential;
     try {
-      credential = selectCfCredential();
+      credential = await selectCfCredential();
     } catch (err) {
       if (err.message === "All Cloudflare credentials exhausted") break;
       throw err;
@@ -160,7 +206,7 @@ async function proxyToCloudflare(options) {
 
     if (isQuotaError(result.status, result.body)) {
       console.log(`[cf] credential #${credential.index} hit daily quota, blacklisting until UTC reset`);
-      markCredentialExhausted(credential.index);
+      await markCredentialExhausted(credential.index);
       continue;
     }
 
@@ -190,7 +236,7 @@ async function proxyToCloudflareStreaming(options) {
   while (true) {
     let credential;
     try {
-      credential = selectCfCredential();
+      credential = await selectCfCredential();
     } catch (err) {
       if (err.message === "All Cloudflare credentials exhausted") break;
       throw err;
@@ -253,7 +299,7 @@ async function proxyToCloudflareStreaming(options) {
 
       if (isQuotaError(result.status, bodyText)) {
         console.log(`[cf] credential #${credential.index} hit daily quota (streaming), blacklisting until UTC reset`);
-        markCredentialExhausted(credential.index);
+        await markCredentialExhausted(credential.index);
         continue;
       }
 
@@ -291,4 +337,5 @@ module.exports = {
   proxyToCloudflare,
   proxyToCloudflareStreaming,
   requestContainsImages,
+  getCfStatus,
 };

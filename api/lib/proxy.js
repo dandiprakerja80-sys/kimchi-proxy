@@ -207,13 +207,13 @@ async function proxyToKimchi(options) {
       }
 
       if (isCreditExhausted(result.status, result.body)) {
-        markKeyExhausted(currentIndex);
-        recordKeyError(currentIndex, `HTTP ${result.status}: credits exhausted`);
+        await markKeyExhausted(currentIndex);
+        await recordKeyError(currentIndex, `HTTP ${result.status}: credits exhausted`);
         lastError.push(new Error(`HTTP ${result.status}: credits exhausted (key ${currentIndex})`));
         continue;
       }
 
-      recordKeyError(currentIndex, `HTTP ${result.status}`);
+      await recordKeyError(currentIndex, `HTTP ${result.status}`);
       lastError.push(new Error(`HTTP ${result.status} (key ${currentIndex})`));
 
       if (result.status === 429) {
@@ -222,7 +222,7 @@ async function proxyToKimchi(options) {
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     } catch (error) {
-      recordKeyError(currentIndex, error.message);
+      await recordKeyError(currentIndex, error.message);
       lastError.push(error instanceof Error ? error : new Error(String(error)));
 
       if (attempt === maxRetries) {

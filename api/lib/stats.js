@@ -1,31 +1,14 @@
 const fs = require("fs");
-const path = require("path");
 
 const STATS_FILE = "/tmp/kimchi-stats.json";
+const BLOB_PATHNAME = "kimchi-proxy/stats.json";
 const MAX_RECENT = 500;
 const MAX_ERRORS = 500;
-const MAX_LOGS = 500;
+const MAX_LOGS = 50;
 const EST_COST_PER_1K_INPUT = 0.0006;
 const EST_COST_PER_1K_OUTPUT = 0.0024;
 
 let _stats = null;
-
-function load() {
-  if (_stats) return _stats;
-  try {
-    if (fs.existsSync(STATS_FILE)) {
-      const raw = fs.readFileSync(STATS_FILE, "utf-8");
-      _stats = JSON.parse(raw);
-      _stats.keys = _stats.keys || { exhausted: [], throttled: [], errors: {} };
-      _stats.keys.exhausted = new Set(_stats.keys.exhausted);
-      _stats.keys.throttled = new Set(_stats.keys.throttled);
-      _stats.keys.errors = new Map(Object.entries(_stats.keys.errors || {}));
-      return _stats;
-    }
-  } catch {}
-  _stats = createFreshStats();
-  return _stats;
-}
 
 function createFreshStats() {
   return {
@@ -41,44 +24,138 @@ function createFreshStats() {
       throttled: new Set(),
       errors: new Map(),
     },
+    cfState: {
+      nextIndex: 0,
+      exhausted: [],
+    },
   };
 }
 
-function save() {
-  if (!_stats) return;
+function normalizeCfState(raw) {
+  if (!raw || typeof raw !== "object") return { nextIndex: 0, exhausted: [] };
+  return {
+    nextIndex: typeof raw.nextIndex === "number" ? raw.nextIndex : 0,
+    exhausted: Array.isArray(raw.exhausted) ? raw.exhausted : [],
+  };
+}
+
+function serialize(stats) {
+  return {
+    ...stats,
+    keys: {
+      exhausted: [...stats.keys.exhausted],
+      throttled: [...stats.keys.throttled],
+      errors: Object.fromEntries(stats.keys.errors),
+    },
+    cfState: normalizeCfState(stats.cfState),
+  };
+}
+
+function deserialize(raw) {
+  return {
+    ...raw,
+    keys: {
+      exhausted: new Set(raw.keys?.exhausted || []),
+      throttled: new Set(raw.keys?.throttled || []),
+      errors: new Map(Object.entries(raw.keys?.errors || {})),
+    },
+    cfState: normalizeCfState(raw.cfState),
+  };
+}
+
+async function loadFromBlob() {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return null;
   try {
-    const out = {
-      ..._stats,
-      keys: {
-        exhausted: [..._stats.keys.exhausted],
-        throttled: [..._stats.keys.throttled],
-        errors: Object.fromEntries(_stats.keys.errors),
-      },
-    };
-    fs.writeFileSync(STATS_FILE, JSON.stringify(out), "utf-8");
+    const { list } = require("@vercel/blob");
+    const { blobs } = await list({ prefix: BLOB_PATHNAME, limit: 1 });
+    const blob = blobs.find((b) => b.pathname === BLOB_PATHNAME);
+    if (!blob) return null;
+    const res = await fetch(`${blob.url}?t=${Date.now()}`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const text = await res.text();
+    return text ? deserialize(JSON.parse(text)) : null;
+  } catch (e) {
+    console.error("[stats] blob load failed:", e.message);
+    return null;
+  }
+}
+
+async function saveToBlob(payload) {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return;
+  try {
+    const { put } = require("@vercel/blob");
+    await put(BLOB_PATHNAME, JSON.stringify(payload), {
+      access: "public",
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      contentType: "application/json",
+    });
+  } catch (e) {
+    console.error("[stats] blob save failed:", e.message);
+  }
+}
+
+async function load(force = false) {
+  if (_stats && !force) return _stats;
+
+  const blobStats = await loadFromBlob();
+  if (blobStats) {
+    _stats = blobStats;
+    return _stats;
+  }
+
+  try {
+    if (fs.existsSync(STATS_FILE)) {
+      const raw = fs.readFileSync(STATS_FILE, "utf-8");
+      _stats = deserialize(JSON.parse(raw));
+      return _stats;
+    }
+  } catch {}
+
+  _stats = createFreshStats();
+  return _stats;
+}
+
+async function save() {
+  if (!_stats) return;
+  const payload = serialize(_stats);
+  await saveToBlob(payload);
+  try {
+    fs.writeFileSync(STATS_FILE, JSON.stringify(payload), "utf-8");
   } catch {}
 }
 
-function markKeyExhausted(index) {
-  const s = load();
+async function getCfState() {
+  const s = await load();
+  return normalizeCfState(s.cfState);
+}
+
+async function setCfState(state) {
+  const s = await load();
+  s.cfState = normalizeCfState(state);
+  await save();
+}
+
+async function markKeyExhausted(index) {
+  const s = await load();
   s.keys.exhausted.add(index);
-  save();
+  await save();
 }
 
-function markKeyThrottled(index) {
-  const s = load();
+async function markKeyThrottled(index) {
+  const s = await load();
   s.keys.throttled.add(index);
-  save();
+  await save();
 }
 
-function unmarkKeyThrottled(index) {
-  const s = load();
+async function unmarkKeyThrottled(index) {
+  const s = await load();
   s.keys.throttled.delete(index);
-  save();
+  await save();
 }
 
-function recordKeyError(index, error) {
-  const s = load();
+async function recordKeyError(index, error) {
+  const s = await load();
   const key = `key_${index}`;
   const prev = s.keys.errors.get(key) || { count: 0, lastError: "", lastTime: 0 };
   s.keys.errors.set(key, {
@@ -86,11 +163,11 @@ function recordKeyError(index, error) {
     lastError: error,
     lastTime: Date.now(),
   });
-  save();
+  await save();
 }
 
-function logRequest(data) {
-  const s = load();
+async function logRequest(data) {
+  const s = await load();
   s.totalRequests++;
   s.totalInputTokens += data.inputTokens || 0;
   s.totalOutputTokens += data.outputTokens || 0;
@@ -143,17 +220,17 @@ function logRequest(data) {
     s.logs = s.logs.slice(0, MAX_LOGS);
   }
 
-  save();
+  await save();
   return entry;
 }
 
-function addLog(entry) {
-  const s = load();
+async function addLog(entry) {
+  const s = await load();
   s.logs.unshift({ ...entry, id: s.logs.length + 1 });
   if (s.logs.length > MAX_LOGS) {
     s.logs = s.logs.slice(0, MAX_LOGS);
   }
-  save();
+  await save();
 }
 
 function filterByRange(arr, range) {
@@ -172,8 +249,8 @@ function filterByRange(arr, range) {
   return arr.filter((e) => e.timestamp >= since);
 }
 
-function getStats(range) {
-  const s = load();
+async function getStats(range) {
+  const s = await load(true);
   const filtered = filterByRange(s.recentRequests, range);
   const filteredErrors = filterByRange(s.errors, range);
 
@@ -181,33 +258,55 @@ function getStats(range) {
   let totalOut = 0;
   let totalReqs = 0;
   let totalErrs = 0;
+  let totalElapsed = 0;
   const providerStats = {};
+  const modelStats = {};
 
   for (const r of filtered) {
     totalReqs++;
     totalIn += r.inputTokens || 0;
     totalOut += r.outputTokens || 0;
+    totalElapsed += r.elapsed || 0;
     if (r.status >= 400) totalErrs++;
 
     const provider = r.provider || "kimchi";
     if (!providerStats[provider]) {
-      providerStats[provider] = { requests: 0, inputTokens: 0, outputTokens: 0, errors: 0 };
+      providerStats[provider] = { requests: 0, inputTokens: 0, outputTokens: 0, errors: 0, elapsed: 0 };
     }
     providerStats[provider].requests++;
     providerStats[provider].inputTokens += r.inputTokens || 0;
     providerStats[provider].outputTokens += r.outputTokens || 0;
+    providerStats[provider].elapsed += r.elapsed || 0;
     if (r.status >= 400) providerStats[provider].errors++;
+
+    const m = r.model || "unknown";
+    if (!modelStats[m]) {
+      modelStats[m] = { requests: 0, inputTokens: 0, outputTokens: 0, errors: 0, elapsed: 0 };
+    }
+    modelStats[m].requests++;
+    modelStats[m].inputTokens += r.inputTokens || 0;
+    modelStats[m].outputTokens += r.outputTokens || 0;
+    modelStats[m].elapsed += r.elapsed || 0;
+    if (r.status >= 400) modelStats[m].errors++;
+  }
+
+  const avgElapsed = totalReqs > 0 ? Math.round(totalElapsed / totalReqs) : 0;
+  for (const p of Object.values(providerStats)) {
+    p.avgElapsed = p.requests > 0 ? Math.round(p.elapsed / p.requests) : 0;
+  }
+  for (const m of Object.values(modelStats)) {
+    m.avgElapsed = m.requests > 0 ? Math.round(m.elapsed / m.requests) : 0;
   }
 
   const cost = (totalIn / 1000) * EST_COST_PER_1K_INPUT + (totalOut / 1000) * EST_COST_PER_1K_OUTPUT;
 
-  const keyErrors = {};
-  s.keys.errors.forEach((val, key) => {
-    keyErrors[key] = val;
-  });
-
   const keysRaw = process.env.KIMCHI_API_KEYS || "";
   const totalKeys = keysRaw ? keysRaw.split(/[,\s]+/).filter(Boolean).length : 0;
+
+  const keyErrors = {};
+  for (const [k, v] of s.keys.errors) {
+    keyErrors[k] = v;
+  }
 
   return {
     range,
@@ -216,17 +315,21 @@ function getStats(range) {
     totalOutputTokens: totalOut,
     totalErrors: totalErrs,
     estimatedCost: cost,
+    avgElapsed,
     providers: providerStats,
+    modelStats,
     keys: {
       total: totalKeys,
       active: totalKeys - s.keys.exhausted.size,
       exhausted: s.keys.exhausted.size,
       throttled: s.keys.throttled.size,
+      _exhausted: Array.from(s.keys.exhausted),
+      _throttled: Array.from(s.keys.throttled),
       errors: keyErrors,
     },
     recentRequests: filtered.slice(0, 100),
     errors: filteredErrors.slice(0, 50),
-    logs: s.logs.slice(0, 150),
+    logs: s.logs.slice(0, 50),
   };
 }
 
@@ -238,4 +341,6 @@ module.exports = {
   markKeyThrottled,
   unmarkKeyThrottled,
   recordKeyError,
+  getCfState,
+  setCfState,
 };
