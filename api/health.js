@@ -19,9 +19,9 @@ module.exports = async function handler(req, res) {
       keysConfigured: keys.length,
       keyStatus: getKeyStatus({ keys }),
       cloudflare: {
-        enabled: await isCfEnabled(),
+        enabled: isCfEnabled(),
         credentialsConfigured: cfCredentials.length,
-        models: ["glm-5.2"],
+        models: ["kimi-k2.7", "kimi-k2.6"],
       },
     };
 

@@ -29,18 +29,11 @@ function parseCfCredentials() {
     .filter(Boolean);
 }
 
-async function isCfEnabled() {
+function isCfEnabled() {
   const enabled = process.env.CLOUDFLARE_ENABLED;
   if (enabled === "false" || enabled === "0") return false;
-  if (parseCfCredentials().length === 0) return false;
-  try {
-    const { getSettings } = require("./settings.js");
-    const settings = await getSettings();
-    return settings.cf_enabled !== false;
-  } catch (e) {
-    console.error("[cloudflare] failed to read settings:", e.message);
-    return true;
-  }
+  // Default enabled if credentials are configured
+  return parseCfCredentials().length > 0;
 }
 
 function selectCfCredential() {
@@ -55,31 +48,14 @@ function selectCfCredential() {
 
 function mapModelToCf(model) {
   const mapping = {
-    "kimi-k2.7": "@cf/zai-org/glm-5.2",
+    "kimi-k2.7": "@cf/moonshotai/kimi-k2.7-code",
+    "kimi-k2.6": "@cf/moonshotai/kimi-k2.6",
   };
   return mapping[model] || model;
 }
 
 function isSupportedModel(model) {
-  return model === "kimi-k2.7";
-}
-
-function requestContainsImages(messages) {
-  if (!Array.isArray(messages)) return false;
-  for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
-    const content = message.content;
-    if (Array.isArray(content)) {
-      for (const item of content) {
-        if (!item || typeof item !== "object") continue;
-        const type = item.type;
-        if (type === "image_url" || type === "image") {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
+  return ["kimi-k2.7", "kimi-k2.6"].includes(model);
 }
 
 function buildCfUpstreamUrl(accountId) {
@@ -112,12 +88,6 @@ async function proxyToCloudflare(options) {
     signal,
   });
 
-  let finishReason = null;
-  try {
-    const parsed = JSON.parse(result.body);
-    finishReason = parsed.choices?.[0]?.finish_reason ?? null;
-  } catch {}
-
   return {
     status: result.status,
     headers: result.headers,
@@ -126,7 +96,6 @@ async function proxyToCloudflare(options) {
     cfIndex: credential.index,
     cfTotal: credential.total,
     attempts: 1,
-    finishReason,
   };
 }
 
@@ -164,7 +133,6 @@ async function proxyToCloudflareStreaming(options) {
     cfIndex: credential.index,
     cfTotal: credential.total,
     attempts: 1,
-    finishReason: null,
   };
 }
 
@@ -175,5 +143,4 @@ module.exports = {
   parseCfCredentials,
   proxyToCloudflare,
   proxyToCloudflareStreaming,
-  requestContainsImages,
 };

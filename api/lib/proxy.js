@@ -197,29 +197,23 @@ async function proxyToKimchi(options) {
       });
 
       if (!RETRYABLE_STATUSES.has(result.status)) {
-        let finishReason = null;
-        try {
-          const parsed = JSON.parse(result.body);
-          finishReason = parsed.choices?.[0]?.finish_reason ?? null;
-        } catch {}
         return {
           status: result.status,
           headers: result.headers,
           body: result.body,
           keyIndex: currentIndex,
           attempts: attempt,
-          finishReason,
         };
       }
 
       if (isCreditExhausted(result.status, result.body)) {
-        await markKeyExhausted(currentIndex);
-        await recordKeyError(currentIndex, `HTTP ${result.status}: credits exhausted`);
+        markKeyExhausted(currentIndex);
+        recordKeyError(currentIndex, `HTTP ${result.status}: credits exhausted`);
         lastError.push(new Error(`HTTP ${result.status}: credits exhausted (key ${currentIndex})`));
         continue;
       }
 
-      await recordKeyError(currentIndex, `HTTP ${result.status}`);
+      recordKeyError(currentIndex, `HTTP ${result.status}`);
       lastError.push(new Error(`HTTP ${result.status} (key ${currentIndex})`));
 
       if (result.status === 429) {
@@ -228,7 +222,7 @@ async function proxyToKimchi(options) {
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     } catch (error) {
-      await recordKeyError(currentIndex, error.message);
+      recordKeyError(currentIndex, error.message);
       lastError.push(error instanceof Error ? error : new Error(String(error)));
 
       if (attempt === maxRetries) {
@@ -281,7 +275,6 @@ async function proxyToKimchiStreaming(options) {
         stream: result.stream,
         keyIndex: keyInfo.index,
         attempts: attempt,
-        finishReason: null,
       };
     } catch (error) {
       lastError.push(error instanceof Error ? error : new Error(String(error)));

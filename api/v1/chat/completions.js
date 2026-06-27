@@ -1,15 +1,14 @@
 const { URL } = require("url");
-const { parseKeys, selectKey, isKeyThrottled } = require("../../lib/key-rotation.js");
+const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
 const { proxyToKimchi, proxyToKimchiStreaming, writeResponse } = require("../../lib/proxy.js");
 const { logRequest, getStats } = require("../../lib/stats.js");
 const { validateProxyApiKey } = require("../../lib/auth.js");
-const { isCfEnabled, isSupportedModel, proxyToCloudflare, proxyToCloudflareStreaming, requestContainsImages } = require("../../lib/cloudflare.js");
+const { isCfEnabled, isSupportedModel, proxyToCloudflare, proxyToCloudflareStreaming } = require("../../lib/cloudflare.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 const AUTO_CONTINUE_MAX = 5;
 const AUTO_CONTINUE_TIMEOUT_MS = 120000;
 const DEFAULT_MAX_TOKENS = 16384;
-const STREAM_TIMEOUT_MS = 120000;
 
 const SKIP_HEADERS = new Set(["transfer-encoding", "connection", "content-length"]);
 
@@ -98,18 +97,12 @@ function mergeResponses(base, continuation) {
   return base;
 }
 
-async function shouldUseCloudflare(model, messages) {
-  if (!(await isCfEnabled())) return false;
-  if (!isSupportedModel(model)) return false;
-  if (requestContainsImages(messages)) {
-    console.log("[cf] image detected, falling back to kimchi");
-    return false;
-  }
-  return true;
+function shouldUseCloudflare(model) {
+  return isCfEnabled() && isSupportedModel(model);
 }
 
 async function tryCloudflareThenKimchi({ body, getNextKey, requestHeaders, signal, maxRetries }) {
-  if (await shouldUseCloudflare(body.model, body.messages)) {
+  if (shouldUseCloudflare(body.model)) {
     try {
       const result = await proxyToCloudflare({
         requestBody: body,
@@ -136,7 +129,7 @@ async function tryCloudflareThenKimchi({ body, getNextKey, requestHeaders, signa
 }
 
 async function tryCloudflareThenKimchiStreaming({ body, getNextKey, requestHeaders, signal }) {
-  if (await shouldUseCloudflare(body.model, body.messages)) {
+  if (shouldUseCloudflare(body.model)) {
     try {
       const result = await proxyToCloudflareStreaming({
         requestBody: body,
@@ -159,18 +152,6 @@ async function tryCloudflareThenKimchiStreaming({ body, getNextKey, requestHeade
     signal,
   });
   return { ...result, provider: "kimchi" };
-}
-
-function setSseHeaders(res, extraHeaders = {}) {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
-  for (const [key, value] of Object.entries(extraHeaders)) {
-    if (!SKIP_HEADERS.has(key.toLowerCase())) {
-      res.setHeader(key, String(value));
-    }
-  }
 }
 
 function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey, startTime) {
@@ -362,7 +343,7 @@ module.exports = async function handler(req, res) {
   if (req.method === "GET" && req.url && req.url.includes("action=stats")) {
     const url = new URL(req.url, "http://localhost");
     const range = url.searchParams.get("range") || "today";
-    const stats = await getStats(range);
+    const stats = getStats(range);
     return res.status(200).json(stats);
   }
 
@@ -423,26 +404,19 @@ module.exports = async function handler(req, res) {
     const isStreaming = body.stream === true;
 
     if (isStreaming) {
-      const streamBody = { ...body };
-      if (!streamBody.stream_options) {
-        streamBody.stream_options = { include_usage: true };
-      }
-
       const result = await tryCloudflareThenKimchiStreaming({
-        body: streamBody,
+        body,
         getNextKey,
         requestHeaders: { "X-Request-Start": String(Date.now()) },
-        signal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
+        signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
       });
 
       res.setHeader("X-Proxy-Key-Index", String(lastKeyIndex));
       res.setHeader("X-Proxy-Key-Total", String(keys.length));
       res.setHeader("X-Proxy-Attempts", String(result.attempts));
       res.setHeader("X-Proxy-Provider", result.provider || "kimchi");
-      setSseHeaders(res, result.headers);
-      res.status(result.status);
 
-      await logRequest({
+      logRequest({
         model,
         status: result.status,
         elapsed: Date.now() - startTime,
@@ -544,7 +518,7 @@ module.exports = async function handler(req, res) {
         }
       } catch {}
 
-      await logRequest({
+      logRequest({
         model,
         status: result.status,
         elapsed,
@@ -562,7 +536,7 @@ module.exports = async function handler(req, res) {
     const elapsed = startTime ? Date.now() - startTime : 0;
     const err = error instanceof Error ? error : new Error(String(error));
 
-    await logRequest({
+    logRequest({
       model,
       status: 502,
       elapsed,
@@ -576,7 +550,7 @@ module.exports = async function handler(req, res) {
 
     return res.status(502).json({
       ok: false,
-      error: "Failed to reach upstream API",
+      error: "Failed to reach Kimchi API",
       keyIndex: lastKeyIndex,
       keyTotal: keys.length,
       attempts: 0,

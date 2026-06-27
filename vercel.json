@@ -15,10 +15,6 @@
     {
       "source": "/",
       "destination": "/api/dashboard"
-    },
-    {
-      "source": "/api/settings",
-      "destination": "/api/dashboard"
     }
   ]
 }
