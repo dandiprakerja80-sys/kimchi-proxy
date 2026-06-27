@@ -3,19 +3,25 @@ const { parseKeys, selectKey, isKeyThrottled } = require("../../lib/key-rotation
 const { proxyToKimchi, proxyToKimchiStreaming, writeResponse } = require("../../lib/proxy.js");
 const { logRequest, getStats } = require("../../lib/stats.js");
 const { validateProxyApiKey } = require("../../lib/auth.js");
-const { isCfEnabled, isSupportedModel, proxyToCloudflare, proxyToCloudflareStreaming } = require("../../lib/cloudflare.js");
+const { isCfEnabled, isSupportedModel, proxyToCloudflare, proxyToCloudflareStreaming, requestContainsImages } = require("../../lib/cloudflare.js");
 
 const KIMCHI_UPSTREAM = "https://llm.kimchi.dev/openai/v1/chat/completions";
 const STREAM_TIMEOUT_MS = 120000;
 
 const SKIP_HEADERS = new Set(["transfer-encoding", "connection", "content-length"]);
 
-async function shouldUseCloudflare(model) {
-  return (await isCfEnabled()) && isSupportedModel(model);
+async function shouldUseCloudflare(model, messages) {
+  if (!(await isCfEnabled())) return false;
+  if (!isSupportedModel(model)) return false;
+  if (requestContainsImages(messages)) {
+    console.log("[cf] image detected, falling back to kimchi");
+    return false;
+  }
+  return true;
 }
 
 async function tryCloudflareThenKimchi({ body, getNextKey, requestHeaders, signal, maxRetries }) {
-  if (await shouldUseCloudflare(body.model)) {
+  if (await shouldUseCloudflare(body.model, body.messages)) {
     try {
       const result = await proxyToCloudflare({
         requestBody: body,
@@ -42,7 +48,7 @@ async function tryCloudflareThenKimchi({ body, getNextKey, requestHeaders, signa
 }
 
 async function tryCloudflareThenKimchiStreaming({ body, getNextKey, requestHeaders, signal }) {
-  if (await shouldUseCloudflare(body.model)) {
+  if (await shouldUseCloudflare(body.model, body.messages)) {
     try {
       const result = await proxyToCloudflareStreaming({
         requestBody: body,

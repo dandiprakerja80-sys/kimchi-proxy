@@ -55,14 +55,31 @@ function selectCfCredential() {
 
 function mapModelToCf(model) {
   const mapping = {
-    "kimi-k2.7": "@cf/moonshotai/kimi-k2.7-code",
-    "kimi-k2.6": "@cf/moonshotai/kimi-k2.6",
+    "kimi-k2.7": "@cf/zai-org/glm-5.2",
   };
   return mapping[model] || model;
 }
 
 function isSupportedModel(model) {
-  return ["kimi-k2.7", "kimi-k2.6"].includes(model);
+  return model === "kimi-k2.7";
+}
+
+function requestContainsImages(messages) {
+  if (!Array.isArray(messages)) return false;
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const content = message.content;
+    if (Array.isArray(content)) {
+      for (const item of content) {
+        if (!item || typeof item !== "object") continue;
+        const type = item.type;
+        if (type === "image_url" || type === "image") {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
 }
 
 function buildCfUpstreamUrl(accountId) {
@@ -158,4 +175,5 @@ module.exports = {
   parseCfCredentials,
   proxyToCloudflare,
   proxyToCloudflareStreaming,
+  requestContainsImages,
 };

@@ -21,7 +21,7 @@ module.exports = async function handler(req, res) {
       cloudflare: {
         enabled: await isCfEnabled(),
         credentialsConfigured: cfCredentials.length,
-        models: ["kimi-k2.7", "kimi-k2.6"],
+        models: ["glm-5.2"],
       },
     };
 

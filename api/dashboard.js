@@ -173,7 +173,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   <h1><span class="dot"></span> Kimchi Proxy</h1>
   <div class="topbar-right">
     <div class="cf-toggle">
-      <span>CF</span>
+      <span>CF (GLM 5.2)</span>
       <button id="cf-toggle-btn" class="on">ON</button>
     </div>
     <div class="topbar-date" id="clock"></div>
