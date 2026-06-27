@@ -101,6 +101,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .cf-toggle button.on{background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff}
   .cf-toggle button.off{background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff}
   .cf-toggle button:hover{opacity:.85}
+  .cf-toggle button:disabled{opacity:.5;cursor:not-allowed}
+  .cf-status{font-size:11px;color:#ef4444;margin-left:6px;max-width:180px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .topbar-date{color:#9090a8;font-size:13px;font-weight:500;text-align:right;line-height:1.4}
   .topbar-date .day{color:#f0f0f5;font-weight:700;font-size:14px}
   .topbar a.signout{color:#6b6b80;text-decoration:none;font-size:13px;transition:color .2s}
@@ -175,6 +177,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     <div class="cf-toggle">
       <span>CF (GLM 5.2)</span>
       <button id="cf-toggle-btn" class="on">ON</button>
+      <span id="cf-status" class="cf-status"></span>
     </div>
     <div class="topbar-date" id="clock"></div>
     <a class="signout" href="/api/dashboard?action=logout">Sign Out</a>
@@ -278,9 +281,13 @@ document.getElementById('range-tabs').addEventListener('click',e=>{
   currentRange=tab.dataset.range;
   load();
 });
+function setCfStatus(msg){
+  const el=document.getElementById('cf-status');
+  if(el)el.textContent=msg||'';
+}
 async function load(){
   try{
-    const r=await fetch('/api/dashboard?action=stats&range='+currentRange);
+    const r=await fetch('/api/dashboard?action=stats&range='+currentRange,{credentials:'same-origin'});
     if(!r.ok){window.location.href='/dashboard';return}
     const d=await r.json();
     document.getElementById('s-req').textContent=fmt(d.totalRequests);
@@ -316,15 +323,23 @@ async function load(){
 }
 async function loadSettings(){
   try{
-    const r=await fetch('/api/settings');
-    if(!r.ok)return;
+    setCfStatus('');
+    const r=await fetch('/api/settings',{credentials:'same-origin'});
+    if(!r.ok){
+      if(r.status===401) window.location.href='/dashboard';
+      else setCfStatus('failed to load setting');
+      return;
+    }
     const s=await r.json();
     const btn=document.getElementById('cf-toggle-btn');
     if(!btn)return;
     const enabled=s.cf_enabled!==false;
     btn.className=enabled?'on':'off';
     btn.textContent=enabled?'ON':'OFF';
-  }catch(e){}
+  }catch(e){
+    setCfStatus('network error');
+    console.error('[dashboard] loadSettings error:',e);
+  }
 }
 async function toggleCf(){
   try{
@@ -332,16 +347,31 @@ async function toggleCf(){
     if(!btn)return;
     const currentOn=btn.classList.contains('on');
     btn.disabled=true;
+    setCfStatus('saving...');
     const r=await fetch('/api/settings',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
+      credentials:'same-origin',
       body:JSON.stringify({cf_enabled:!currentOn})
     });
     btn.disabled=false;
-    if(!r.ok)return;
+    if(!r.ok){
+      if(r.status===401){
+        window.location.href='/dashboard';
+        return;
+      }
+      const err=await r.text().catch(()=>'save failed');
+      setCfStatus(err);
+      return;
+    }
+    setCfStatus('');
     await loadSettings();
     load();
-  }catch(e){}
+  }catch(e){
+    btn.disabled=false;
+    setCfStatus('network error');
+    console.error('[dashboard] toggleCf error:',e);
+  }
 }
 document.getElementById('cf-toggle-btn').addEventListener('click',toggleCf);
 loadSettings();
