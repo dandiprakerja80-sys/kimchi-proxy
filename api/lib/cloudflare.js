@@ -62,10 +62,7 @@ function hasUsableCredential() {
 function isCfEnabled() {
   const enabled = process.env.CLOUDFLARE_ENABLED;
   if (enabled === "false" || enabled === "0") return false;
-  const creds = parseCfCredentials();
-  const usable = hasUsableCredential();
-  console.log(`[cf debug] env=${enabled}, creds=${creds.length}, usable=${usable}`);
-  return creds.length > 0 && usable;
+  return parseCfCredentials().length > 0 && hasUsableCredential();
 }
 
 function selectCfCredential() {

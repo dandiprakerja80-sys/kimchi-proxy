@@ -22,10 +22,6 @@ module.exports = async function handler(req, res) {
         enabled: isCfEnabled(),
         credentialsConfigured: cfCredentials.length,
         models: ["glm-5.2"],
-        debug: {
-          env: process.env.CLOUDFLARE_ENABLED,
-          usable: cfCredentials.length > 0,
-        },
       },
     };
 
