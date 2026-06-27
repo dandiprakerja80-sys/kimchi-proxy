@@ -327,7 +327,7 @@ async function getStats(range) {
       _throttled: Array.from(s.keys.throttled),
       errors: keyErrors,
     },
-    recentRequests: filtered.slice(0, 100),
+    recentRequests: filtered.slice(0, 50),
     errors: filteredErrors.slice(0, 50),
     logs: s.logs.slice(0, 50),
   };
