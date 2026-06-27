@@ -1,7 +1,7 @@
 const { URL } = require("url");
 const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
 const { proxyToKimchi, proxyToKimchiStreaming, writeResponse } = require("../../lib/proxy.js");
-const { logRequest, getStats } = require("../../lib/stats.js");
+const { logRequest, getStats, getExhaustedKeys } = require("../../lib/stats.js");
 const { validateProxyApiKey } = require("../../lib/auth.js");
 const { isCfEnabled, isSupportedModel, proxyToCloudflare, proxyToCloudflareStreaming, requestContainsImages } = require("../../lib/cloudflare.js");
 
@@ -26,6 +26,24 @@ function extractOutputText(sseEvents) {
     } catch {}
   }
   return text;
+}
+
+function estimateStreamOutputTokens(sseEvents) {
+  let chars = 0;
+  for (const line of sseEvents) {
+    if (!line.startsWith("data: ")) continue;
+    const data = line.slice(6);
+    if (data === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(data);
+      const delta = parsed.choices?.[0]?.delta;
+      if (delta) {
+        if (delta.content) chars += delta.content.length;
+        if (delta.reasoning_content) chars += delta.reasoning_content.length;
+      }
+    } catch {}
+  }
+  return Math.max(0, Math.ceil(chars / 4));
 }
 
 function isStreamComplete(allLines) {
@@ -167,6 +185,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
     let buffer = "";
     const allLines = [];
     let lastDataTime = Date.now();
+    let outputTokens = 0;
 
     const keepalive = setInterval(() => {
       if (!done && Date.now() - lastDataTime > 10000) {
@@ -175,13 +194,25 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
       }
     }, 5000);
 
-    function finish() {
+    function finish(extraTokens = 0) {
       clearInterval(keepalive);
       done = true;
       if (!clientRes.writableEnded) {
         try { clientRes.end(); } catch {}
       }
-      resolve();
+      resolve(outputTokens + extraTokens);
+    }
+
+    function processDataLine(line) {
+      if (!line.startsWith("data: ")) return;
+      const data = line.slice(6);
+      allLines.push(`data: ${data}`);
+      outputTokens += estimateStreamOutputTokens([`data: ${data}`]);
+      if (data === "[DONE]") {
+        finish();
+        return;
+      }
+      try { clientRes.write(`data: ${data}\n\n`); } catch {}
     }
 
     stream.on("data", (chunk) => {
@@ -192,13 +223,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
       buffer = lines.pop() || "";
       for (const line of lines) {
         if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-          allLines.push(`data: ${data}`);
-          if (data === "[DONE]") {
-            finish();
-            return;
-          }
-          try { clientRes.write(`data: ${data}\n\n`); } catch {}
+          processDataLine(line);
         } else if (line.startsWith(":")) {
           // SSE comment, skip
         }
@@ -209,12 +234,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
       if (buffer.trim()) {
         allLines.push(buffer.trim());
         if (buffer.startsWith("data: ")) {
-          const data = buffer.slice(6);
-          if (data === "[DONE]") {
-            finish();
-            return;
-          }
-          try { clientRes.write(`data: ${data}\n\n`); } catch {}
+          processDataLine(buffer.trim());
         }
       }
 
@@ -227,7 +247,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
       console.log(`[auto-continue] stream incomplete, partial output: ${partialOutput.length} chars`);
 
       autoContinue(body, keys, getNextKey, clientRes, partialOutput, startTime, 1)
-        .then(() => finish())
+        .then((tokens) => finish(tokens || 0))
         .catch(() => finish());
     });
 
@@ -239,7 +259,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
         return;
       }
       autoContinue(body, keys, getNextKey, clientRes, partialOutput, startTime, 1)
-        .then(() => finish())
+        .then((tokens) => finish(tokens || 0))
         .catch(() => finish());
     });
 
@@ -252,7 +272,7 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
         }
         const partialOutput = extractOutputText(allLines);
         autoContinue(body, keys, getNextKey, clientRes, partialOutput, startTime, 1)
-          .then(() => finish())
+          .then((tokens) => finish(tokens || 0))
           .catch(() => finish());
       }
     });
@@ -262,11 +282,11 @@ function streamWithAutoContinue(clientRes, initialResult, body, keys, getNextKey
 async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, startTime, attempt) {
   if (attempt > AUTO_CONTINUE_MAX) {
     console.log(`[auto-continue] max attempts reached`);
-    return;
+    return 0;
   }
   if (Date.now() - startTime > AUTO_CONTINUE_TIMEOUT_MS) {
     console.log(`[auto-continue] timeout approaching, aborting`);
-    return;
+    return 0;
   }
 
   console.log(`[auto-continue] attempt ${attempt}, resuming from ${partialOutput.length} chars`);
@@ -283,12 +303,13 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
 
     if (result.status !== 200) {
       console.log(`[auto-continue] upstream returned ${result.status}`);
-      return;
+      return 0;
     }
 
     let buffer = "";
     const allLines = [];
     let lastDataTime = Date.now();
+    let outputTokens = 0;
 
     const keepalive = setInterval(() => {
       if (Date.now() - lastDataTime > 10000) {
@@ -301,6 +322,15 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
       let finished = false;
       const finish = () => { if (!finished) { finished = true; clearInterval(keepalive); res(); } };
 
+      function processDataLine(line) {
+        if (!line.startsWith("data: ")) return;
+        const data = line.slice(6);
+        allLines.push(`data: ${data}`);
+        outputTokens += estimateStreamOutputTokens([`data: ${data}`]);
+        if (data === "[DONE]") { finish(); return; }
+        try { clientRes.write(`data: ${data}\n\n`); } catch {}
+      }
+
       result.stream.on("data", (chunk) => {
         lastDataTime = Date.now();
         const text = chunk.toString("utf-8");
@@ -309,10 +339,7 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
         buffer = lines.pop() || "";
         for (const line of lines) {
           if (line.startsWith("data: ")) {
-            const data = line.slice(6);
-            allLines.push(`data: ${data}`);
-            if (data === "[DONE]") { finish(); return; }
-            try { clientRes.write(`data: ${data}\n\n`); } catch {}
+            processDataLine(line);
           }
         }
       });
@@ -321,8 +348,7 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
         if (buffer.trim()) {
           allLines.push(buffer.trim());
           if (buffer.startsWith("data: ")) {
-            const data = buffer.slice(6);
-            if (data !== "[DONE]") try { clientRes.write(`data: ${data}\n\n`); } catch {}
+            processDataLine(buffer.trim());
           }
         }
         finish();
@@ -334,10 +360,14 @@ async function autoContinue(body, keys, getNextKey, clientRes, partialOutput, st
 
     if (!isStreamComplete(allLines)) {
       const newPartial = extractOutputText(allLines);
-      await autoContinue(body, keys, getNextKey, clientRes, partialOutput + newPartial, startTime, attempt + 1);
+      const moreTokens = await autoContinue(body, keys, getNextKey, clientRes, partialOutput + newPartial, startTime, attempt + 1);
+      return outputTokens + (moreTokens || 0);
     }
+
+    return outputTokens;
   } catch (err) {
     console.error(`[auto-continue] error:`, err.message);
+    return 0;
   }
 }
 
@@ -382,10 +412,16 @@ module.exports = async function handler(req, res) {
     }
 
     let rotateIndex = keySelection.index;
+    let exhaustedKeys = new Set();
+    try {
+      exhaustedKeys = new Set(await getExhaustedKeys());
+    } catch (e) {
+      console.error("[completions] failed to load exhausted keys:", e.message);
+    }
 
     const getNextKey = () => {
       let skipAttempts = 0;
-      while (isKeyThrottled(keys[rotateIndex]) && skipAttempts < keys.length) {
+      while ((isKeyThrottled(keys[rotateIndex]) || exhaustedKeys.has(rotateIndex)) && skipAttempts < keys.length) {
         rotateIndex = (rotateIndex + 1) % keys.length;
         skipAttempts++;
       }
@@ -422,24 +458,26 @@ module.exports = async function handler(req, res) {
       res.setHeader("X-Proxy-Attempts", String(result.attempts));
       res.setHeader("X-Proxy-Provider", result.provider || "kimchi");
 
+      const streamOutputTokens = await streamWithAutoContinue(res, result, body, keys, getNextKey, startTime);
+
+      const elapsed = Date.now() - startTime;
       await logRequest({
         model,
         status: result.status,
-        elapsed: Date.now() - startTime,
+        elapsed,
         keyIndex: result.cfIndex ?? lastKeyIndex,
         provider: result.provider || "kimchi",
         inputTokens: body.messages ? body.messages.reduce((s, m) => s + (m.content || "").length / 4, 0) : 0,
-        outputTokens: 0,
+        outputTokens: streamOutputTokens,
         method: "POST",
       });
-
-      await streamWithAutoContinue(res, result, body, keys, getNextKey, startTime);
     } else {
+      const maxRetries = Math.min(keys.length, parseInt(process.env.KIMCHI_MAX_RETRIES || "10", 10));
       let result = await tryCloudflareThenKimchi({
         body,
         getNextKey,
         requestHeaders: { "X-Request-Start": String(Date.now()) },
-        maxRetries: Math.min(keys.length, 55),
+        maxRetries,
         signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
       });
 
@@ -473,11 +511,12 @@ module.exports = async function handler(req, res) {
             autoContinueAttempts++;
             console.log(`[auto-continue] non-streaming attempt ${attempt}, content: ${content.length} chars, reasoning: ${reasoning.length} chars`);
 
+            const continueMaxRetries = Math.min(keys.length, parseInt(process.env.KIMCHI_MAX_RETRIES || "10", 10));
             const continueResult = await tryCloudflareThenKimchi({
               body: buildContinueBody(body, content),
               getNextKey,
               requestHeaders: { "X-Request-Start": String(Date.now()) },
-              maxRetries: Math.min(keys.length, 55),
+              maxRetries: continueMaxRetries,
               signal: AbortSignal.timeout(AUTO_CONTINUE_TIMEOUT_MS),
             });
 

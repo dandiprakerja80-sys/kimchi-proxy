@@ -4,9 +4,11 @@
  */
 
 const { requestUpstream, requestUpstreamStreaming, FETCH_TIMEOUT_MS } = require("./proxy.js");
-const { getCfState, setCfState } = require("./stats.js");
+const { getCfState, setCfState, addCfKeyLog } = require("./stats.js");
 
 const CF_UPSTREAM_BASE = "https://api.cloudflare.com/client/v4/accounts";
+const SLOW_THRESHOLD_MS = 20 * 1000;
+const THROTTLE_DURATION_MS = 30 * 60 * 1000;
 
 function parseCfCredentials() {
   const raw = process.env.CLOUDFLARE_CREDENTIALS;
@@ -37,38 +39,75 @@ async function getCfStateSafe() {
     return await getCfState();
   } catch (e) {
     console.error("[cf] failed to load state:", e.message);
-    return { nextIndex: 0, exhausted: [] };
+    return { nextIndex: 0, exhausted: [], throttled: [], slow: [], logs: {} };
   }
 }
 
-async function isCredentialExhausted(index) {
-  const state = await getCfStateSafe();
-  const entry = state.exhausted.find((e) => e.index === index);
-  if (!entry) return false;
-  if (Date.now() >= entry.until) {
-    state.exhausted = state.exhausted.filter((e) => e.index !== index);
-    await setCfState(state);
-    return false;
-  }
-  return true;
+function cleanupExpired(state) {
+  const now = Date.now();
+  state.exhausted = state.exhausted.filter((e) => now < e.until);
+  state.throttled = state.throttled.filter((e) => now < e.until);
+  state.slow = state.slow.filter((e) => now < e.until);
 }
 
-async function markCredentialExhausted(index) {
+function isCredentialBlocked(state, index) {
+  const now = Date.now();
+  return (
+    state.exhausted.some((e) => e.index === index && now < e.until) ||
+    state.throttled.some((e) => e.index === index && now < e.until) ||
+    state.slow.some((e) => e.index === index && now < e.until)
+  );
+}
+
+async function updateCfState(mutator) {
   const state = await getCfStateSafe();
-  if (!state.exhausted.some((e) => e.index === index)) {
-    state.exhausted.push({ index, until: getNextUtcMidnight() });
-  }
+  cleanupExpired(state);
+  mutator(state);
   try {
     await setCfState(state);
   } catch (e) {
-    console.error("[cf] failed to save exhausted state:", e.message);
+    console.error("[cf] failed to save state:", e.message);
+  }
+}
+
+async function markCredentialExhausted(index) {
+  await updateCfState((state) => {
+    if (!state.exhausted.some((e) => e.index === index)) {
+      state.exhausted.push({ index, until: getNextUtcMidnight() });
+    }
+  });
+}
+
+async function markCredentialThrottled(index) {
+  await updateCfState((state) => {
+    if (!state.throttled.some((e) => e.index === index)) {
+      state.throttled.push({ index, until: Date.now() + THROTTLE_DURATION_MS });
+    }
+  });
+}
+
+async function markCredentialSlow(index) {
+  await updateCfState((state) => {
+    if (!state.slow.some((e) => e.index === index)) {
+      state.slow.push({ index, until: Date.now() + THROTTLE_DURATION_MS });
+    }
+  });
+}
+
+async function addCredentialLog(index, data) {
+  try {
+    await addCfKeyLog(index, data);
+  } catch (e) {
+    console.error("[cf] failed to save credential log:", e.message);
   }
 }
 
 async function hasUsableCredential() {
   const credentials = parseCfCredentials();
+  const state = await getCfStateSafe();
+  cleanupExpired(state);
   for (let i = 0; i < credentials.length; i++) {
-    if (!(await isCredentialExhausted(i))) return true;
+    if (!isCredentialBlocked(state, i)) return true;
   }
   return false;
 }
@@ -82,16 +121,28 @@ function isCfEnabled() {
 async function getCfStatus() {
   const credentials = parseCfCredentials();
   const state = await getCfStateSafe();
-  const now = Date.now();
-  const exhausted = state.exhausted.filter((e) => now < e.until);
-  const activeCount = credentials.length - exhausted.length;
+  cleanupExpired(state);
+  const total = credentials.length;
+  const blocked = new Set();
+  for (const tier of [state.exhausted, state.throttled, state.slow]) {
+    for (const e of tier) blocked.add(e.index);
+  }
+  const activeCount = total - blocked.size;
+  const allBlocked = [...state.exhausted, ...state.throttled, ...state.slow];
+  const nextReset = allBlocked.length > 0 ? Math.min(...allBlocked.map((e) => e.until)) : null;
   return {
     enabled: isCfEnabled() && activeCount > 0,
-    total: credentials.length,
+    total,
     active: Math.max(0, activeCount),
-    exhausted: exhausted.length,
-    exhaustedCredentials: exhausted,
-    nextReset: exhausted.length > 0 ? Math.min(...exhausted.map((e) => e.until)) : null,
+    exhausted: state.exhausted.length,
+    throttled: state.throttled.length,
+    slow: state.slow.length,
+    blockedCredentials: {
+      exhausted: state.exhausted,
+      throttled: state.throttled,
+      slow: state.slow,
+    },
+    nextReset,
   };
 }
 
@@ -102,14 +153,13 @@ async function selectCfCredential() {
   }
 
   const state = await getCfStateSafe();
-  const now = Date.now();
-  state.exhausted = state.exhausted.filter((e) => now < e.until);
+  cleanupExpired(state);
 
   let startIdx = state.nextIndex % credentials.length;
   let selectedIdx = -1;
   for (let i = 0; i < credentials.length; i++) {
     const idx = (startIdx + i) % credentials.length;
-    if (!state.exhausted.some((e) => e.index === idx)) {
+    if (!isCredentialBlocked(state, idx)) {
       selectedIdx = idx;
       break;
     }
@@ -158,14 +208,43 @@ function requestContainsImages(messages) {
 }
 
 function isQuotaError(status, bodyText) {
-  if (status !== 429) return false;
+  if (status !== 429 && status !== 402) return false;
   if (!bodyText || typeof bodyText !== "string") return false;
   const lower = bodyText.toLowerCase();
-  return lower.includes("daily free allocation") || lower.includes("used up your daily");
+  return (
+    lower.includes("daily free allocation") ||
+    lower.includes("used up your daily") ||
+    lower.includes("exhausted") ||
+    lower.includes("credit") ||
+    lower.includes("quota")
+  );
+}
+
+function isRateLimitError(status) {
+  return status === 429;
 }
 
 function buildCfUpstreamUrl(accountId) {
   return `${CF_UPSTREAM_BASE}/${accountId}/ai/v1/chat/completions`;
+}
+
+function estimateOutputTokens(bodyText) {
+  try {
+    const parsed = JSON.parse(bodyText);
+    if (parsed.usage && typeof parsed.usage.completion_tokens === "number") {
+      return parsed.usage.completion_tokens;
+    }
+    const content = parsed.choices?.[0]?.message?.content || "";
+    return Math.ceil(content.length / 4);
+  } catch {
+    return 0;
+  }
+}
+
+function estimateInputTokens(requestBody) {
+  const messages = requestBody?.messages;
+  if (!Array.isArray(messages)) return 0;
+  return Math.ceil(messages.reduce((s, m) => s + (m.content || "").length / 4, 0));
 }
 
 async function proxyToCloudflare(options) {
@@ -190,25 +269,77 @@ async function proxyToCloudflare(options) {
     const upstreamUrl = buildCfUpstreamUrl(credential.accountId);
     const cfBody = { ...requestBody, model: mapModelToCf(requestBody.model) };
 
-    const result = await requestUpstream({
-      url: upstreamUrl,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${credential.token}`,
-        ...requestHeaders,
-        "X-Proxy-Cf-Index": String(credential.index),
-      },
-      body: JSON.stringify(cfBody),
-      timeoutMs,
-      signal,
-    });
+    const startTime = Date.now();
+    const inputTokens = estimateInputTokens(requestBody);
+    let result;
+    try {
+      result = await requestUpstream({
+        url: upstreamUrl,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${credential.token}`,
+          ...requestHeaders,
+          "X-Proxy-Cf-Index": String(credential.index),
+        },
+        body: JSON.stringify(cfBody),
+        timeoutMs,
+        signal,
+      });
+    } catch (err) {
+      const elapsed = Date.now() - startTime;
+      await addCredentialLog(credential.index, {
+        status: 0,
+        elapsed,
+        inputTokens,
+        outputTokens: 0,
+        error: err.message || "network error",
+      });
+      throw err;
+    }
+
+    const elapsed = Date.now() - startTime;
+    const outputTokens = estimateOutputTokens(result.body);
 
     if (isQuotaError(result.status, result.body)) {
       console.log(`[cf] credential #${credential.index} hit daily quota, blacklisting until UTC reset`);
       await markCredentialExhausted(credential.index);
+      await addCredentialLog(credential.index, {
+        status: result.status,
+        elapsed,
+        inputTokens,
+        outputTokens,
+        error: "daily quota exhausted",
+      });
       continue;
     }
+
+    if (isRateLimitError(result.status)) {
+      console.log(`[cf] credential #${credential.index} hit rate limit, throttling for ${THROTTLE_DURATION_MS / 60000}m`);
+      await markCredentialThrottled(credential.index);
+      await addCredentialLog(credential.index, {
+        status: result.status,
+        elapsed,
+        inputTokens,
+        outputTokens,
+        error: "rate limited",
+      });
+      continue;
+    }
+
+    const slow = elapsed > SLOW_THRESHOLD_MS;
+    if (slow) {
+      console.log(`[cf] credential #${credential.index} slow (${elapsed}ms), marking slow for ${THROTTLE_DURATION_MS / 60000}m`);
+      await markCredentialSlow(credential.index);
+    }
+
+    await addCredentialLog(credential.index, {
+      status: result.status,
+      elapsed,
+      inputTokens,
+      outputTokens,
+      error: null,
+    });
 
     return {
       status: result.status,
@@ -218,6 +349,7 @@ async function proxyToCloudflare(options) {
       cfIndex: credential.index,
       cfTotal: credential.total,
       attempts,
+      elapsed,
     };
   }
 
@@ -246,24 +378,38 @@ async function proxyToCloudflareStreaming(options) {
     const upstreamUrl = buildCfUpstreamUrl(credential.accountId);
     const cfBody = { ...requestBody, model: mapModelToCf(requestBody.model) };
 
-    const result = await requestUpstreamStreaming({
-      url: upstreamUrl,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${credential.token}`,
-        ...requestHeaders,
-        "X-Proxy-Cf-Index": String(credential.index),
-      },
-      body: JSON.stringify(cfBody),
-      timeoutMs,
-      signal,
-    });
+    const startTime = Date.now();
+    const inputTokens = estimateInputTokens(requestBody);
+    let result;
+    try {
+      result = await requestUpstreamStreaming({
+        url: upstreamUrl,
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${credential.token}`,
+          ...requestHeaders,
+          "X-Proxy-Cf-Index": String(credential.index),
+        },
+        body: JSON.stringify(cfBody),
+        timeoutMs,
+        signal,
+      });
+    } catch (err) {
+      const elapsed = Date.now() - startTime;
+      await addCredentialLog(credential.index, {
+        status: 0,
+        elapsed,
+        inputTokens,
+        outputTokens: 0,
+        error: err.message || "network error",
+      });
+      throw err;
+    }
+
+    const elapsed = Date.now() - startTime;
 
     if (result.status === 429) {
-      // For streaming we cannot read the body synchronously to detect quota message,
-      // so we must consume the stream first. If the status is already 429, CF usually
-      // returns a JSON error body, not a stream. We read the first chunk to inspect.
       const chunks = [];
       let resolved = false;
       const bodyText = await new Promise((resolve) => {
@@ -300,20 +446,34 @@ async function proxyToCloudflareStreaming(options) {
       if (isQuotaError(result.status, bodyText)) {
         console.log(`[cf] credential #${credential.index} hit daily quota (streaming), blacklisting until UTC reset`);
         await markCredentialExhausted(credential.index);
-        continue;
+      } else {
+        console.log(`[cf] credential #${credential.index} hit rate limit (streaming), throttling for ${THROTTLE_DURATION_MS / 60000}m`);
+        await markCredentialThrottled(credential.index);
       }
 
-      // Not a quota error; we already consumed part of the stream so just return what we have.
-      return {
+      await addCredentialLog(credential.index, {
         status: result.status,
-        headers: result.headers,
-        stream: result.stream,
-        provider: "cf",
-        cfIndex: credential.index,
-        cfTotal: credential.total,
-        attempts,
-      };
+        elapsed,
+        inputTokens,
+        outputTokens: 0,
+        error: isQuotaError(result.status, bodyText) ? "daily quota exhausted" : "rate limited",
+      });
+      continue;
     }
+
+    const slow = elapsed > SLOW_THRESHOLD_MS;
+    if (slow) {
+      console.log(`[cf] credential #${credential.index} slow first byte (${elapsed}ms), marking slow for ${THROTTLE_DURATION_MS / 60000}m`);
+      await markCredentialSlow(credential.index);
+    }
+
+    await addCredentialLog(credential.index, {
+      status: result.status,
+      elapsed,
+      inputTokens,
+      outputTokens: 0,
+      error: null,
+    });
 
     return {
       status: result.status,
@@ -323,6 +483,7 @@ async function proxyToCloudflareStreaming(options) {
       cfIndex: credential.index,
       cfTotal: credential.total,
       attempts,
+      elapsed,
     };
   }
 

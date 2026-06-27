@@ -1,4 +1,4 @@
-const { getStats } = require("./lib/stats.js");
+const { getStats, getCfKeyLogs } = require("./lib/stats.js");
 const { getCfStatus } = require("./lib/cloudflare.js");
 
 function getSessionSecret() {
@@ -128,10 +128,20 @@ body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,
 .provider-cf{color:#60a5fa}
 .cf-grid,.key-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(48px,1fr));gap:8px;margin-top:16px}
 .cf-cell,.key-cell{border-radius:8px;padding:8px 4px;text-align:center;font-size:11px;font-weight:700;border:1px solid var(--border)}
-.cf-cell.active,.key-cell.active{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.35);color:var(--ok)}
-.cf-cell.exhausted,.key-cell.exhausted{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35);color:var(--danger)}
-.key-cell.throttled{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.35);color:var(--warn)}
-.key-cell.error{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35);color:var(--danger)}
+.cf-cell.active,.key-cell.active{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.35);color:var(--ok);cursor:pointer}
+.cf-cell.exhausted,.key-cell.exhausted{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35);color:var(--danger);cursor:pointer}
+.cf-cell.throttled,.key-cell.throttled{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.35);color:var(--warn);cursor:pointer}
+.cf-cell.slow{background:rgba(147,51,234,.12);border-color:rgba(147,51,234,.35);color:#c084fc;cursor:pointer}
+.key-cell.error{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.35);color:var(--danger);cursor:pointer}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(4px);z-index:100;display:flex;align-items:center;justify-content:center}
+.modal{background:var(--panel);border:1px solid var(--border);border-radius:14px;width:90%;max-width:720px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 25px 50px -12px rgba(0,0,0,.6)}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--border)}
+.modal-header h3{margin:0;font-size:16px}
+.modal-close{background:none;border:none;color:var(--muted);font-size:20px;cursor:pointer;padding:0;width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:6px}
+.modal-close:hover{background:var(--panel-2);color:var(--text)}
+.modal-body{padding:16px 20px;overflow-y:auto}
+.modal-body table{font-size:12px}
+.modal-body td{white-space:nowrap}
 .section{margin-bottom:28px}
 .section h2{margin:0 0 16px 0;font-size:17px;font-weight:700;display:flex;align-items:center;gap:8px}
 table{width:100%;border-collapse:separate;border-spacing:0;background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;font-size:13px}
@@ -215,6 +225,8 @@ code{font-family:'Fira Code','Courier New',monospace;font-size:12px;background:v
       <div class="metric-row"><span class="muted">Total Accounts</span><span class="value" id="cf-total">—</span></div>
       <div class="metric-row"><span class="muted">Active</span><span class="value provider-kimchi" id="cf-active">—</span></div>
       <div class="metric-row"><span class="muted">Exhausted</span><span class="value" id="cf-exhausted">—</span></div>
+      <div class="metric-row"><span class="muted">Throttled</span><span class="value" id="cf-throttled">—</span></div>
+      <div class="metric-row"><span class="muted">Slow</span><span class="value" id="cf-slow">—</span></div>
       <div class="metric-row"><span class="muted">Next UTC Reset</span><span class="value" id="cf-reset">—</span></div>
       <div class="cf-grid" id="cf-grid"></div>
     </div>
@@ -267,6 +279,15 @@ code{font-family:'Fira Code','Courier New',monospace;font-size:12px;background:v
     </div>
   </div>
 </div>
+<div class="modal-overlay" id="modal-overlay" style="display:none">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="modal-title">Credential Logs</h3>
+      <button class="modal-close" id="modal-close">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
 <script>
 let currentRange='today';
 let currentLogFilter='all';
@@ -309,6 +330,9 @@ function renderCfStatus(cf){
   lastCfStatus=cf;
   const enabled=cf.enabled;
   const exhausted=cf.exhausted||0;
+  const throttled=cf.throttled||0;
+  const slow=cf.slow||0;
+  const blocked=exhausted+throttled+slow;
   const total=cf.total||0;
   const ind=document.getElementById('cf-indicator');
   const txt=document.getElementById('cf-status-text');
@@ -317,13 +341,13 @@ function renderCfStatus(cf){
     ind.className='indicator off';
     txt.textContent='CF: OFF';
     dot.className='dot';
-  } else if(exhausted>=total && total>0){
+  } else if(blocked>=total && total>0){
     ind.className='indicator err';
-    txt.textContent='CF: ALL EXHAUSTED';
+    txt.textContent='CF: ALL BLOCKED';
     dot.className='dot err';
-  } else if(exhausted>0){
+  } else if(blocked>0){
     ind.className='indicator warn';
-    txt.textContent='CF: '+exhausted+'/'+total+' exhausted';
+    txt.textContent='CF: '+blocked+'/'+total+' blocked';
     dot.className='dot warn';
   } else {
     ind.className='indicator';
@@ -333,15 +357,64 @@ function renderCfStatus(cf){
   document.getElementById('cf-total').textContent=fmt(total);
   document.getElementById('cf-active').textContent=fmt(cf.active||0);
   document.getElementById('cf-exhausted').textContent=fmt(exhausted);
+  document.getElementById('cf-throttled').textContent=fmt(throttled);
+  document.getElementById('cf-slow').textContent=fmt(slow);
   document.getElementById('cf-reset').textContent=cf.nextReset?new Date(cf.nextReset).toUTCString():'—';
   const grid=document.getElementById('cf-grid');
   if(total===0){grid.innerHTML='<div class="empty" style="grid-column:1/-1;padding:12px">No CF credentials</div>';return}
-  const exhaustedSet=new Set((cf.exhaustedCredentials||[]).map(x=>x.index));
+  const blockedSet=new Set();
+  const exhaustedSet=new Set();
+  const throttledSet=new Set();
+  const slowSet=new Set();
+  if(cf.blockedCredentials){
+    (cf.blockedCredentials.exhausted||[]).forEach(x=>{blockedSet.add(x.index);exhaustedSet.add(x.index)});
+    (cf.blockedCredentials.throttled||[]).forEach(x=>{blockedSet.add(x.index);throttledSet.add(x.index)});
+    (cf.blockedCredentials.slow||[]).forEach(x=>{blockedSet.add(x.index);slowSet.add(x.index)});
+  }
   grid.innerHTML=Array.from({length:total},(_,i)=>{
-    const isEx=exhaustedSet.has(i);
-    return '<div class="cf-cell '+(isEx?'exhausted':'active')+'" title="Account #'+(i+1)+': '+(isEx?'exhausted until UTC reset':'active')+'"><div class="num">'+(i+1)+'</div><div class="lbl">'+(isEx?'BAN':'OK')+'</div></div>';
+    let cls='active',lbl='OK',title='Account #'+(i+1)+': active';
+    if(exhaustedSet.has(i)){cls='exhausted';lbl='BAN';title='Account #'+(i+1)+': exhausted until UTC reset'}
+    else if(throttledSet.has(i)){cls='throttled';lbl='THR';title='Account #'+(i+1)+': throttled (rate limit)'}
+    else if(slowSet.has(i)){cls='slow';lbl='SLOW';title='Account #'+(i+1)+': slow response'}
+    return '<div class="cf-cell '+cls+'" data-index="'+i+'" title="'+esc(title)+'"><div class="num">'+(i+1)+'</div><div class="lbl">'+lbl+'</div></div>';
   }).join('');
 }
+
+async function showCfModal(index){
+  const overlay=document.getElementById('modal-overlay');
+  const body=document.getElementById('modal-body');
+  const title=document.getElementById('modal-title');
+  title.textContent='CF Credential #'+(index+1)+' — Recent Logs';
+  body.innerHTML='<div class="empty">Loading...</div>';
+  overlay.style.display='flex';
+  try{
+    const r=await fetch('/api/dashboard?action=cf_key_logs&index='+index);
+    if(!r.ok)throw new Error('unauthorized');
+    const d=await r.json();
+    if(!d.logs||d.logs.length===0){body.innerHTML='<div class="empty">No logs for this credential</div>';return}
+    body.innerHTML='<table><thead><tr><th>Time</th><th>Status</th><th>Elapsed</th><th>In</th><th>Out</th><th>Error</th></tr></thead><tbody>'+
+      d.logs.map(l=>'<tr><td>'+time(l.timestamp)+'<br><span style="color:#9ca3af;font-size:11px">'+ago(l.timestamp)+'</span></td><td><span class="badge '+(l.status<400?'ok':'err')+'">'+(l.status||'NET')+'</span></td><td>'+fmtMs(l.elapsed)+'</td><td>'+fmt(l.inputTokens)+'</td><td>'+fmt(l.outputTokens)+'</td><td class="error-msg" title="'+esc(l.error||'')+'">'+esc(l.error||'—')+'</td></tr>').join('')+
+      '</tbody></table>';
+  }catch(e){
+    body.innerHTML='<div class="empty">Failed to load logs</div>';
+  }
+}
+
+function closeModal(){
+  document.getElementById('modal-overlay').style.display='none';
+}
+
+document.getElementById('cf-grid').addEventListener('click',e=>{
+  const cell=e.target.closest('.cf-cell');
+  if(!cell)return;
+  const idx=parseInt(cell.dataset.index,10);
+  showCfModal(idx);
+});
+
+document.getElementById('modal-overlay').addEventListener('click',e=>{
+  if(e.target.id==='modal-overlay')closeModal();
+});
+document.getElementById('modal-close').addEventListener('click',closeModal);
 
 function renderKeys(keys){
   if(!keys)return;
@@ -491,6 +564,20 @@ module.exports = async function handler(req, res) {
         logs: [],
         cfStatus: await getCfStatus(),
       });
+    }
+  }
+
+  if (req.url && req.url.startsWith("/api/dashboard?action=cf_key_logs")) {
+    if (!checkAuth(req)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    const url = new URL(req.url, "http://localhost");
+    const index = parseInt(url.searchParams.get("index") || "0", 10);
+    try {
+      const logs = await getCfKeyLogs(index);
+      return res.status(200).json({ index, logs });
+    } catch (e) {
+      return res.status(200).json({ index, logs: [] });
     }
   }
 

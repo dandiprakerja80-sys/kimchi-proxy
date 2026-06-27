@@ -10,6 +10,8 @@ const EST_COST_PER_1K_OUTPUT = 0.0024;
 
 let _stats = null;
 
+const CF_LOGS_PER_KEY = 5;
+
 function createFreshStats() {
   return {
     totalRequests: 0,
@@ -27,15 +29,23 @@ function createFreshStats() {
     cfState: {
       nextIndex: 0,
       exhausted: [],
+      throttled: [],
+      slow: [],
+      logs: {},
     },
   };
 }
 
 function normalizeCfState(raw) {
-  if (!raw || typeof raw !== "object") return { nextIndex: 0, exhausted: [] };
+  if (!raw || typeof raw !== "object") {
+    return { nextIndex: 0, exhausted: [], throttled: [], slow: [], logs: {} };
+  }
   return {
     nextIndex: typeof raw.nextIndex === "number" ? raw.nextIndex : 0,
     exhausted: Array.isArray(raw.exhausted) ? raw.exhausted : [],
+    throttled: Array.isArray(raw.throttled) ? raw.throttled : [],
+    slow: Array.isArray(raw.slow) ? raw.slow : [],
+    logs: raw.logs && typeof raw.logs === "object" ? raw.logs : {},
   };
 }
 
@@ -134,6 +144,33 @@ async function setCfState(state) {
   const s = await load();
   s.cfState = normalizeCfState(state);
   await save();
+}
+
+async function getCfKeyLogs(index) {
+  const s = await load();
+  const logs = s.cfState.logs || {};
+  return Array.isArray(logs[String(index)]) ? logs[String(index)] : [];
+}
+
+async function addCfKeyLog(index, entry) {
+  const s = await load();
+  const key = String(index);
+  const logs = s.cfState.logs || {};
+  const current = Array.isArray(logs[key]) ? logs[key] : [];
+  current.unshift({ ...entry, timestamp: entry.timestamp || Date.now() });
+  logs[key] = current.slice(0, CF_LOGS_PER_KEY);
+  s.cfState.logs = logs;
+  await save();
+}
+
+async function getExhaustedKeys() {
+  const s = await load();
+  return Array.from(s.keys.exhausted);
+}
+
+async function isKeyExhausted(index) {
+  const s = await load();
+  return s.keys.exhausted.has(index);
 }
 
 async function markKeyExhausted(index) {
@@ -341,6 +378,10 @@ module.exports = {
   markKeyThrottled,
   unmarkKeyThrottled,
   recordKeyError,
+  getExhaustedKeys,
+  isKeyExhausted,
   getCfState,
   setCfState,
+  getCfKeyLogs,
+  addCfKeyLog,
 };
