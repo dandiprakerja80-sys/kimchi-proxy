@@ -1,7 +1,6 @@
 const fs = require("fs");
 
 const STATS_FILE = "/tmp/kimchi-stats.json";
-const BLOB_PATHNAME = "kimchi-proxy/stats.json";
 const MAX_RECENT = 500;
 const MAX_ERRORS = 500;
 const MAX_LOGS = 50;
@@ -11,11 +10,13 @@ const EST_COST_PER_1K_OUTPUT = 0.0024;
 let _stats = null;
 let _saveTimer = null;
 let _savePromise = null;
-let _blobSuspended = false;
+let _supabaseClient = null;
 
 const CF_LOGS_PER_KEY = 5;
 const SAVE_DEBOUNCE_MS = 1000;
 const PERSIST_STATS = process.env.PERSIST_STATS !== "false";
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY;
 
 function createFreshStats() {
   return {
@@ -78,60 +79,59 @@ function deserialize(raw) {
   };
 }
 
-async function loadFromBlob() {
-  if (!PERSIST_STATS || _blobSuspended || !process.env.BLOB_READ_WRITE_TOKEN) return null;
+function getSupabaseClient() {
+  if (_supabaseClient) return _supabaseClient;
+  if (!PERSIST_STATS || !SUPABASE_URL || !SUPABASE_KEY) return null;
   try {
-    const { list } = require("@vercel/blob");
-    const { blobs } = await list({ prefix: BLOB_PATHNAME, limit: 1 });
-    const blob = blobs.find((b) => b.pathname === BLOB_PATHNAME);
-    if (!blob) return null;
-    const res = await fetch(`${blob.url}?t=${Date.now()}`, { cache: "no-store" });
-    if (!res.ok) return null;
-    const text = await res.text();
-    if (text.includes("blocked") || text.includes("suspended")) {
-      _blobSuspended = true;
-      console.error("[stats] blob store suspended or blocked, switching to ephemeral mode");
-      return null;
-    }
-    return text ? deserialize(JSON.parse(text)) : null;
+    const { createClient } = require("@supabase/supabase-js");
+    _supabaseClient = createClient(SUPABASE_URL, SUPABASE_KEY);
+    return _supabaseClient;
   } catch (e) {
-    if (String(e.message).toLowerCase().includes("suspended") || String(e.message).toLowerCase().includes("blocked")) {
-      _blobSuspended = true;
-      console.error("[stats] blob store suspended or blocked, switching to ephemeral mode");
-    } else {
-      console.error("[stats] blob load failed:", e.message);
-    }
+    console.error("[stats] supabase init failed:", e.message);
     return null;
   }
 }
 
-async function saveToBlob(payload) {
-  if (!PERSIST_STATS || _blobSuspended || !process.env.BLOB_READ_WRITE_TOKEN) return;
+async function loadFromSupabase() {
+  const supabase = getSupabaseClient();
+  if (!supabase) return null;
   try {
-    const { put } = require("@vercel/blob");
-    await put(BLOB_PATHNAME, JSON.stringify(payload), {
-      access: "public",
-      addRandomSuffix: false,
-      allowOverwrite: true,
-      contentType: "application/json",
-    });
-  } catch (e) {
-    const msg = String(e.message).toLowerCase();
-    if (msg.includes("suspended") || msg.includes("blocked")) {
-      _blobSuspended = true;
-      console.error("[stats] blob store suspended or blocked, switching to ephemeral mode");
-    } else {
-      console.error("[stats] blob save failed:", e.message);
+    const { data, error } = await supabase.from("proxy_stats").select("data").eq("id", 1).single();
+    if (error) {
+      if (error.code !== "PGRST116") {
+        console.error("[stats] supabase load failed:", error.message);
+      }
+      return null;
     }
+    if (!data || !data.data) return null;
+    return deserialize(JSON.parse(data.data));
+  } catch (e) {
+    console.error("[stats] supabase load failed:", e.message);
+    return null;
+  }
+}
+
+async function saveToSupabase(payload) {
+  const supabase = getSupabaseClient();
+  if (!supabase) return;
+  try {
+    const { error } = await supabase
+      .from("proxy_stats")
+      .upsert({ id: 1, data: JSON.stringify(payload), updated_at: new Date().toISOString() });
+    if (error) {
+      console.error("[stats] supabase save failed:", error.message);
+    }
+  } catch (e) {
+    console.error("[stats] supabase save failed:", e.message);
   }
 }
 
 async function load(force = false) {
   if (_stats && !force) return _stats;
 
-  const blobStats = await loadFromBlob();
-  if (blobStats) {
-    _stats = blobStats;
+  const supabaseStats = await loadFromSupabase();
+  if (supabaseStats) {
+    _stats = supabaseStats;
     return _stats;
   }
 
@@ -152,7 +152,7 @@ async function flushSave() {
   if (_savePromise) return _savePromise;
   _savePromise = (async () => {
     const payload = serialize(_stats);
-    await saveToBlob(payload);
+    await saveToSupabase(payload);
     try {
       fs.writeFileSync(STATS_FILE, JSON.stringify(payload), "utf-8");
     } catch {}
