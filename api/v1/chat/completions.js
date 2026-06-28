@@ -1,7 +1,7 @@
 const { URL } = require("url");
 const { parseKeys, selectKey, throttleKey, isKeyThrottled } = require("../../lib/key-rotation.js");
 const { proxyToKimchi, proxyToKimchiStreaming, writeResponse } = require("../../lib/proxy.js");
-const { logRequest, getStats, getExhaustedKeys } = require("../../lib/stats.js");
+const { logRequest, getStats, getExhaustedKeys, flushNow } = require("../../lib/stats.js");
 const { validateProxyApiKey } = require("../../lib/auth.js");
 const { isCfEnabled, isSupportedModel, proxyToCloudflare, proxyToCloudflareStreaming, requestContainsImages } = require("../../lib/cloudflare.js");
 
@@ -602,5 +602,11 @@ module.exports = async function handler(req, res) {
       elapsedMs: elapsed,
       details: err.message,
     });
+  } finally {
+    try {
+      await flushNow();
+    } catch (e) {
+      console.error("[completions] flush stats failed:", e.message);
+    }
   }
 };

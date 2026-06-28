@@ -9,8 +9,13 @@ const EST_COST_PER_1K_INPUT = 0.0006;
 const EST_COST_PER_1K_OUTPUT = 0.0024;
 
 let _stats = null;
+let _saveTimer = null;
+let _savePromise = null;
+let _blobSuspended = false;
 
 const CF_LOGS_PER_KEY = 5;
+const SAVE_DEBOUNCE_MS = 1000;
+const PERSIST_STATS = process.env.PERSIST_STATS !== "false";
 
 function createFreshStats() {
   return {
@@ -74,7 +79,7 @@ function deserialize(raw) {
 }
 
 async function loadFromBlob() {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) return null;
+  if (!PERSIST_STATS || _blobSuspended || !process.env.BLOB_READ_WRITE_TOKEN) return null;
   try {
     const { list } = require("@vercel/blob");
     const { blobs } = await list({ prefix: BLOB_PATHNAME, limit: 1 });
@@ -83,15 +88,25 @@ async function loadFromBlob() {
     const res = await fetch(`${blob.url}?t=${Date.now()}`, { cache: "no-store" });
     if (!res.ok) return null;
     const text = await res.text();
+    if (text.includes("blocked") || text.includes("suspended")) {
+      _blobSuspended = true;
+      console.error("[stats] blob store suspended or blocked, switching to ephemeral mode");
+      return null;
+    }
     return text ? deserialize(JSON.parse(text)) : null;
   } catch (e) {
-    console.error("[stats] blob load failed:", e.message);
+    if (String(e.message).toLowerCase().includes("suspended") || String(e.message).toLowerCase().includes("blocked")) {
+      _blobSuspended = true;
+      console.error("[stats] blob store suspended or blocked, switching to ephemeral mode");
+    } else {
+      console.error("[stats] blob load failed:", e.message);
+    }
     return null;
   }
 }
 
 async function saveToBlob(payload) {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) return;
+  if (!PERSIST_STATS || _blobSuspended || !process.env.BLOB_READ_WRITE_TOKEN) return;
   try {
     const { put } = require("@vercel/blob");
     await put(BLOB_PATHNAME, JSON.stringify(payload), {
@@ -101,7 +116,13 @@ async function saveToBlob(payload) {
       contentType: "application/json",
     });
   } catch (e) {
-    console.error("[stats] blob save failed:", e.message);
+    const msg = String(e.message).toLowerCase();
+    if (msg.includes("suspended") || msg.includes("blocked")) {
+      _blobSuspended = true;
+      console.error("[stats] blob store suspended or blocked, switching to ephemeral mode");
+    } else {
+      console.error("[stats] blob save failed:", e.message);
+    }
   }
 }
 
@@ -126,13 +147,38 @@ async function load(force = false) {
   return _stats;
 }
 
+async function flushSave() {
+  if (!_stats) return;
+  if (_savePromise) return _savePromise;
+  _savePromise = (async () => {
+    const payload = serialize(_stats);
+    await saveToBlob(payload);
+    try {
+      fs.writeFileSync(STATS_FILE, JSON.stringify(payload), "utf-8");
+    } catch {}
+  })();
+  try {
+    await _savePromise;
+  } finally {
+    _savePromise = null;
+  }
+}
+
 async function save() {
   if (!_stats) return;
-  const payload = serialize(_stats);
-  await saveToBlob(payload);
-  try {
-    fs.writeFileSync(STATS_FILE, JSON.stringify(payload), "utf-8");
-  } catch {}
+  if (_saveTimer) clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    _saveTimer = null;
+    flushSave();
+  }, SAVE_DEBOUNCE_MS);
+}
+
+async function flushNow() {
+  if (_saveTimer) {
+    clearTimeout(_saveTimer);
+    _saveTimer = null;
+  }
+  return flushSave();
 }
 
 async function getCfState() {
@@ -384,4 +430,5 @@ module.exports = {
   setCfState,
   getCfKeyLogs,
   addCfKeyLog,
+  flushNow,
 };
